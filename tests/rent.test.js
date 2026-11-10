@@ -392,3 +392,65 @@ describe('Rent grouped payments, annual frequency and actual-paid reporting', ()
     await request(app).get('/api/rent/payment-groups').set(mgrAuth).expect(403);
   });
 });
+
+describe('Rent group persistence hardening and report date modes', () => {
+  it('retried group create returns the same group instead of duplicating allocations', async () => {
+    const ag = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 2700, frequency: 'monthly', paymentMethod: 'cheque', firstDueDate: daysFromNow(9),
+    }).expect(201);
+    const pay = await RentPayment.findOne({ agreementId: ag.body._id, status: 'Pending' });
+    const body = { authorityId, method: 'cheque', dueDate: daysFromNow(9), paymentIds: [pay._id] };
+    const first = await request(app).post('/api/rent/payment-groups').set(auth()).send(body).expect(201);
+    // Simulate lost response: client retries the identical request
+    const retry = await request(app).post('/api/rent/payment-groups').set(auth()).send(body).expect(200);
+    expect(retry.body._id).toBe(first.body._id);
+    const groups = await request(app).get('/api/rent/payment-groups').set(auth());
+    expect(groups.body.filter((g) => g.allocations.some((a) => String(a.paymentId) === String(pay._id)))).toHaveLength(1);
+  });
+
+  it('handed/cleared are idempotent and converge payments after a partial failure', async () => {
+    const group = (await request(app).get('/api/rent/payment-groups').set(auth()).expect(200)).body
+      .find((g) => g.totalAmount === 2700 && g.status === 'Pending');
+    await request(app).post(`/api/rent/payment-groups/${group._id}/handed`).set(auth()).expect(200);
+    await request(app).post(`/api/rent/payment-groups/${group._id}/handed`).set(auth()).expect(200); // duplicate no-op
+    // Simulate partial failure: one payment left behind in Pending
+    const payment = await RentPayment.findOne({ groupId: group._id });
+    payment.status = 'Pending'; payment.paidAt = null; await payment.save();
+    await request(app).post(`/api/rent/payment-groups/${group._id}/handed`).set(auth()).expect(200); // retry converges it
+    expect((await RentPayment.findById(payment._id)).status).toBe('Handed');
+    await request(app).post(`/api/rent/payment-groups/${group._id}/cleared`).set(auth()).expect(200);
+    await request(app).post(`/api/rent/payment-groups/${group._id}/cleared`).set(auth()).expect(200); // duplicate no-op
+    expect((await RentPayment.findById(payment._id)).status).toBe('Cleared');
+  });
+
+  it('reconcile repairs a lost groupId link and divergent payment status', async () => {
+    const ag = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 1900, frequency: 'monthly', paymentMethod: 'cheque', firstDueDate: daysFromNow(11),
+    }).expect(201);
+    const pay = await RentPayment.findOne({ agreementId: ag.body._id, status: 'Pending' });
+    const g = await request(app).post('/api/rent/payment-groups').set(auth()).send({
+      authorityId, method: 'cheque', dueDate: daysFromNow(11), paymentIds: [pay._id],
+    }).expect(201);
+    await request(app).post(`/api/rent/payment-groups/${g.body._id}/cleared`).set(auth()).expect(200);
+    // Simulate crash between group save and payment propagation
+    pay.status = 'Pending'; pay.groupId = null; pay.clearedAt = null; pay.paidAt = null; await pay.save();
+    const { reconcileRentPaymentGroups } = await import('../src/controllers/rentController.js');
+    await reconcileRentPaymentGroups();
+    const repaired = await RentPayment.findById(pay._id);
+    expect(String(repaired.groupId)).toBe(g.body._id);
+    expect(repaired.status).toBe('Cleared');
+    expect(repaired.clearedAt).not.toBeNull();
+  });
+
+  it('cleared-date mode reports money that arrived in the period only', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const cleared = await request(app).get(`/api/rent/reports/paid?from=${today}&to=${today}&dateField=cleared`).set(auth()).expect(200);
+    expect(cleared.body.dateField).toBe('cleared');
+    const total = cleared.body.authorities.reduce((s, a) => s + a.clearedTotal, 0);
+    const dbTotal = (await RentPayment.find({ status: 'Cleared' })).reduce((s, p) => s + p.amount, 0);
+    expect(total).toBe(dbTotal); // everything was cleared today in this suite
+    // A window in the past with no clearances reports nothing
+    const empty = await request(app).get('/api/rent/reports/paid?from=2020-01-01&to=2020-12-31&dateField=cleared').set(auth()).expect(200);
+    expect(empty.body.authorities).toHaveLength(0);
+  });
+});

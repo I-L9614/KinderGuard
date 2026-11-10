@@ -4,7 +4,7 @@ import connectDB from './config/db.js';
 import { cleanupExpiredRefreshTokens } from './controllers/authController.js';
 import { reconcileBranchDeletions } from './services/licenseCleanup.js';
 import { generateDueNotifications } from './controllers/notificationController.js';
-import { scheduleAllRentPayments, generateDueRentReminders } from './controllers/rentController.js';
+import { scheduleAllRentPayments, generateDueRentReminders, reconcileRentPaymentGroups } from './controllers/rentController.js';
 import { refreshLicenseStatuses } from './controllers/licenseController.js';
 import { fileURLToPath } from 'url';
 
@@ -31,6 +31,7 @@ export const startServer = async () => {
     await refreshLicenseStatuses();
     await generateDueNotifications();
     await scheduleAllRentPayments();
+    await reconcileRentPaymentGroups();
     await generateDueRentReminders();
     await reconcileBranchDeletions();
   };

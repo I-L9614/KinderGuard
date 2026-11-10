@@ -366,6 +366,16 @@ export const createPaymentGroup = async (req, res) => {
   if (!authority) return res.status(404).json({ message: 'הרשות לא נמצאה' });
   const payments = await RentPayment.find({ _id: { $in: ids }, adminId });
   if (payments.length !== ids.length) return res.status(400).json({ message: 'חלק מהתשלומים שנבחרו לא נמצאו' });
+  // A retried create must never duplicate allocations: if these exact payments
+  // already sit in one live group (e.g. the first attempt saved the group but
+  // the response was lost), return that group instead of creating a second.
+  const existing = await RentPaymentGroup.find({ status: { $ne: 'Cancelled' }, 'allocations.paymentId': { $in: ids } });
+  if (existing.length) {
+    const same = existing.length === 1 && existing[0].allocations.length === ids.length
+      && existing[0].allocations.every((a) => ids.some((id) => String(id) === String(a.paymentId)));
+    if (same) return res.status(200).json(existing[0]);
+    return res.status(409).json({ message: 'חלק מהתשלומים כבר שובצו לתשלום מרוכז אחר' });
+  }
   if (payments.some((p) => p.status !== 'Pending')) return res.status(409).json({ message: 'אפשר לשבץ רק תשלומים שממתינים למסירה' });
   if (payments.some((p) => p.groupId)) return res.status(409).json({ message: 'חלק מהתשלומים כבר שובצו לתשלום מרוכז אחר' });
   if (payments.some((p) => String(p.authorityId) !== String(authority._id))) return res.status(400).json({ message: 'כל התשלומים בתשלום מרוכז חייבים להיות לאותה רשות' });
@@ -392,47 +402,78 @@ const findGroup = async (req, res) => {
   return group;
 };
 
+// Propagating a group state onto its payments can only converge, never
+// diverge: payment filters target the states that still need the transition,
+// so a retried call after a partial failure finishes the remaining payments,
+// and a duplicate call is a harmless no-op.
+const propagateGroupState = async (group) => {
+  if (group.status === 'Handed') {
+    await RentPayment.updateMany({ groupId: group._id, status: 'Pending' }, { status: 'Handed', paidAt: group.handedAt });
+  } else if (group.status === 'Cleared') {
+    await RentPayment.updateMany(
+      { groupId: group._id, status: { $in: ['Pending', 'Handed'] } },
+      [{ $set: { status: 'Cleared', clearedAt: group.clearedAt, paidAt: { $ifNull: ['$paidAt', group.clearedAt] } } }],
+    );
+  }
+  // Re-link payments that missed the groupId write (partial create failure).
+  await RentPayment.updateMany(
+    { _id: { $in: group.allocations.map((a) => a.paymentId) }, groupId: null },
+    { groupId: group._id },
+  );
+};
+
 export const markGroupHanded = async (req, res) => {
   const group = await findGroup(req, res);
   if (!group) return;
   if (group.method !== 'cheque') return res.status(400).json({ message: 'סימון ״צ\'ק נמסר״ רלוונטי רק לתשלום בצ\'ק. בהעברה בנקאית סמנו ישירות ״נפרע״.' });
+  if (group.status === 'Handed') { await propagateGroupState(group); return res.json(group); } // idempotent retry
   if (group.status !== 'Pending') return res.status(409).json({ message: 'אפשר לסמן ״נמסר״ רק תשלום שממתין למסירה' });
   group.status = 'Handed';
   group.handedAt = new Date();
   await group.save();
-  await RentPayment.updateMany({ groupId: group._id, status: 'Pending' }, { status: 'Handed', paidAt: group.handedAt });
+  await propagateGroupState(group);
   res.json(group);
 };
 
 export const markGroupCleared = async (req, res) => {
   const group = await findGroup(req, res);
   if (!group) return;
+  if (group.status === 'Cleared') { await propagateGroupState(group); return res.json(group); } // idempotent retry
   if (!['Pending', 'Handed'].includes(group.status)) return res.status(409).json({ message: 'התשלום המרוכז כבר נפרע או בוטל' });
   group.status = 'Cleared';
   group.clearedAt = new Date();
   await group.save();
-  const payments = await RentPayment.find({ groupId: group._id, status: { $in: ['Pending', 'Handed'] } });
-  for (const payment of payments) {
-    payment.status = 'Cleared';
-    payment.clearedAt = group.clearedAt;
-    if (!payment.paidAt) payment.paidAt = group.clearedAt;
-    await payment.save();
-  }
+  await propagateGroupState(group);
   await generateDueRentReminders(); // resolves the linked payments' reminders
   res.json(group);
+};
+
+// Durable recovery: converges any payment/group divergence left by a partial
+// failure (group saved but payments not updated, or link write lost). Runs in
+// the hourly maintenance alongside schedule materialization and reminders.
+export const reconcileRentPaymentGroups = async () => {
+  const groups = await RentPaymentGroup.find({ status: { $in: ['Pending', 'Handed', 'Cleared'] } });
+  for (const group of groups) await propagateGroupState(group);
 };
 
 // ----- Actual-paid report: what was really paid, per authority and per branch -----
 
 // Payments are the single source of truth: every shekel of a grouped payment
 // lives on exactly one allocation's payment row, so summing payments can never
-// double count. Period filters by due date; Cancelled rows are excluded.
+// double count. The period can filter by DUE date (what had to be paid in the
+// period, cleared vs outstanding) or by ACTUAL CLEAR date (money that really
+// arrived in the period; outstanding is due-based and shown only in due mode).
 export const getPaidReport = async (req, res) => {
   const adminId = getAdminId(req.user);
   const now = new Date();
   const from = validDate(req.query.from) ? dayStart(req.query.from) : dayStart(new Date(now.getFullYear(), 0, 1));
   const to = validDate(req.query.to) ? dayEnd(req.query.to) : dayEnd(new Date(now.getFullYear(), 11, 31));
-  const filter = { adminId, dueDate: { $gte: from, $lte: to }, status: { $ne: 'Cancelled' } };
+  const byClearDate = req.query.dateField === 'cleared';
+  const filter = { adminId, status: { $ne: 'Cancelled' } };
+  // Cleared mode reports money that actually arrived in the period only;
+  // outstanding is a due-based concept and stays in due mode.
+  if (byClearDate) { filter.status = 'Cleared'; filter.clearedAt = { $gte: from, $lte: to }; }
+  else filter.dueDate = { $gte: from, $lte: to };
   if (req.query.authorityId) filter.authorityId = req.query.authorityId;
   const payments = await RentPayment.find(filter).sort({ dueDate: 1 });
   const byAuthority = new Map();
@@ -458,5 +499,5 @@ export const getPaidReport = async (req, res) => {
   const authorities = [...byAuthority.values()]
     .map((a) => ({ ...a, branches: [...a.branches.values()].sort((x, y) => x.branchName.localeCompare(y.branchName, 'he')) }))
     .sort((x, y) => x.authorityName.localeCompare(y.authorityName, 'he'));
-  res.json({ from, to, authorities });
+  res.json({ from, to, dateField: byClearDate ? 'cleared' : 'due', authorities });
 };
