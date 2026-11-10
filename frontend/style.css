@@ -18,3 +18,67 @@
 @media (max-width: 700px) {
   .three-col { grid-template-columns: 1fr; }
 }
+
+/* ----- משימות ----- */
+.task-filters{display:flex;gap:6px;flex-wrap:wrap}
+.task-filters button{white-space:nowrap}
+.task-row{display:flex;align-items:center;gap:12px;padding:13px 0;border-bottom:1px solid #edf1ef}
+.task-row:last-child{border-bottom:0}
+.task-check{flex:0 0 26px;width:26px;height:26px;border-radius:8px;border:2px solid #b9cdc6;display:grid;place-items:center;background:#fff;color:#fff;padding:0}
+.task-check:hover{border-color:var(--teal);transform:none}
+.task-check.done{background:var(--teal);border-color:var(--teal)}
+.task-check.readonly{opacity:.4;cursor:not-allowed}
+.task-check.readonly:hover{border-color:#b9cdc6}
+.task-main{flex:1;min-width:0}
+.task-main strong{font-size:14px;display:block}
+.task-main small{color:var(--muted);font-size:12px;display:block;margin-top:3px}
+.task-overdue{color:var(--danger)!important;font-weight:700}
+.task-actions{display:flex;gap:2px}
+
+/* KinderGuard mobile polish - approved preview layer */
+@media (max-width:620px){
+  .topbar{position:sticky;padding:10px 14px;min-height:0;gap:8px}
+  .brand-mark{width:36px;height:36px;border-radius:12px;font-size:13px}
+  .brand h1{font-size:15px}
+  #header-actions{display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px}
+  .nav{gap:4px;padding-bottom:2px;flex-wrap:wrap}
+  .nav button{font-size:13px;padding:10px 12px;min-height:40px;white-space:nowrap}
+  .user-menu .user-name{display:none}
+  .content{padding:20px 14px 48px}
+  .welcome-row h2,.branch-title h2{font-size:24px}
+  .welcome-row .primary{width:100%;min-height:46px}
+  .stats-grid{grid-template-columns:repeat(2,1fr);gap:10px;margin:18px 0 26px}
+  .stat-card{min-height:76px;padding:12px;gap:10px;border-radius:14px}
+  .stat-card strong{font-size:22px}
+  .branch-grid{grid-template-columns:1fr;gap:12px}
+  .branch-card{padding:16px}
+  .search-input{max-width:100%;min-height:46px;font-size:16px}
+  .license-row{display:grid;grid-template-columns:40px 1fr;row-gap:8px}
+  .license-row .status-pill{margin:0;justify-self:start;grid-column:2}
+  .license-row .text-button{grid-column:2;justify-self:start;min-height:40px;padding:6px 0}
+  .branch-title .button-row{width:100%}
+  .button-row .primary,.button-row .secondary{flex:1;min-height:46px}
+  .alert-card{display:grid;grid-template-columns:39px 1fr;row-gap:10px}
+  .alert-actions{grid-column:1/-1;width:100%;padding:0;display:flex;gap:8px}
+  .alert-actions button{flex:1;min-height:46px}
+  .panel{padding:16px;border-radius:16px}
+  .settings-grid{grid-template-columns:1fr}
+  .primary,.secondary{min-height:46px}
+  .small-btn{min-height:40px;padding:10px 14px}
+  .type-chip{min-height:40px}
+  .settings-type{padding:14px 0}
+  .settings-type .text-button{min-height:40px;padding:10px 6px}
+  .auth-layout{margin:1vh auto}
+  .tabs{padding:4px}
+  .tab{padding:12px;min-height:44px}
+  .auth-panel form label{font-size:13px}
+  .auth-panel input{min-height:48px;font-size:16px}
+  .footer{font-size:11px;flex-wrap:wrap}
+  .task-filters{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px}
+  .task-filters button{min-height:40px}
+  .task-row{display:grid;grid-template-columns:26px 1fr auto;gap:6px 10px;padding:14px 0;align-items:center}
+  .task-row .status-pill{justify-self:end}
+  .task-actions{grid-column:1/-1;justify-self:start;display:flex;gap:8px}
+  .task-actions .icon-button{min-height:40px;min-width:40px}
+  .toast{left:12px;right:12px;bottom:12px;max-width:none}
+}

@@ -1,6 +1,6 @@
 const app = document.getElementById('app');
 const headerActions = document.getElementById('header-actions');
-const state = { user: null, branches: [], licenses: [], types: [], alerts: [], page: 'branches', branchId: null, token: null, cardFilter: null, rent: null, rentAuthorityFilter: null };
+const state = { user: null, branches: [], licenses: [], types: [], alerts: [], tasks: [], taskFilter: 'all', taskScope: 'mine', page: 'branches', branchId: null, token: null, cardFilter: null, rent: null, rentAuthorityFilter: null };
 const esc = (value = '') => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const date = (value) => value ? new Date(value).toLocaleDateString('he-IL') : '—';
 const api = async (url, options = {}) => {
@@ -85,7 +85,7 @@ const loadApp = async () => {
     const refreshed = await api('/api/auth/refresh', { method: 'POST' });
     state.token = refreshed.token;
     state.user = await api('/api/users/me');
-    [state.branches, state.licenses, state.alerts] = await Promise.all([api('/api/branches'), api('/api/licenses'), api('/api/notifications')]);
+    [state.branches, state.licenses, state.alerts, state.tasks] = await Promise.all([api('/api/branches'), api('/api/licenses'), api('/api/notifications'), api('/api/tasks')]);
     state.types = await api('/api/license-types');
     if (state.branchId && !state.branches.some((b) => b._id === state.branchId)) state.branchId = null;
     render();
@@ -114,11 +114,11 @@ const branchName = (id) => state.branches.find((b) => b._id === (id?._id || id))
 const typeName = (id) => state.types.find((t) => t._id === (id?._id || id))?.name || id?.name || 'אישור';
 const currentAlerts = () => state.alerts.filter((a) => ['Open', 'In_Progress'].includes(a.status));
 const renderHeader = () => {
-  headerActions.innerHTML = `<nav class="nav"><button data-page="branches" class="${state.page === 'branches' ? 'selected' : ''}">הסניפים שלי</button><button data-page="alerts" class="${state.page === 'alerts' ? 'selected' : ''}">התראות <b class="nav-count">${currentAlerts().length}</b></button>${state.user.role === 'Admin' ? `<button data-page="rent" class="${state.page === 'rent' ? 'selected' : ''}">שכירות</button><button data-page="settings" class="${state.page === 'settings' ? 'selected' : ''}">הגדרות וצוות</button>` : ''}</nav><div class="user-menu"><span class="user-avatar">${esc(state.user.name.slice(0, 1))}</span><span>${esc(state.user.name)}<small>${state.user.role === 'Admin' ? 'מנהל חשבון' : 'משתמש'}</small></span><button class="icon-button" id="logout" title="התנתקות">↪</button></div>`;
+  headerActions.innerHTML = `<nav class="nav"><button data-page="branches" class="${state.page === 'branches' ? 'selected' : ''}">הסניפים שלי</button><button data-page="alerts" class="${state.page === 'alerts' ? 'selected' : ''}">התראות <b class="nav-count">${currentAlerts().length}</b></button><button data-page="tasks" class="${state.page === 'tasks' ? 'selected' : ''}">משימות <b class="nav-count">${state.tasks.filter((task) => task.status !== 'Done').length}</b></button>${state.user.role === 'Admin' ? `<button data-page="rent" class="${state.page === 'rent' ? 'selected' : ''}">שכירות</button><button data-page="settings" class="${state.page === 'settings' ? 'selected' : ''}">הגדרות וצוות</button>` : ''}</nav><div class="user-menu"><span class="user-avatar">${esc(state.user.name.slice(0, 1))}</span><span class="user-name">${esc(state.user.name)}<small>${state.user.role === 'Admin' ? 'מנהל חשבון' : 'משתמש'}</small></span><button class="icon-button" id="logout" title="התנתקות">↪</button></div>`;
   headerActions.querySelectorAll('[data-page]').forEach((button) => button.onclick = () => { state.page = button.dataset.page; state.branchId = null; render(); });
   document.getElementById('logout').onclick = async () => { try { await api('/api/auth/logout', { method: 'POST' }); } catch {} state.user = null; state.token = null; renderAuth(); };
 };
-const render = () => { renderHeader(); if (state.page === 'alerts') return renderAlerts(); if (state.page === 'rent') return renderRent(); if (state.page === 'settings') return renderSettings(); if (state.branchId) return renderBranch(); return renderBranches(); };
+const render = () => { renderHeader(); if (state.page === 'alerts') return renderAlerts(); if (state.page === 'tasks') return renderTasks(); if (state.page === 'rent') return renderRent(); if (state.page === 'settings') return renderSettings(); if (state.branchId) return renderBranch(); return renderBranches(); };
 
 const renderBranches = () => {
   const alerts = currentAlerts();
@@ -266,6 +266,61 @@ const alertCard = (item, archived = false) => {
   }
   const license = item.licenseId || {}; const kind = item.triggerDays === 30 ? '30 יום מראש' : item.triggerDays === 7 ? 'שבוע מראש' : 'היום';
   return `<article class="alert-card ${item.triggerDays === 0 ? 'urgent' : ''}"><div class="alert-marker ${item.triggerDays === 0 ? 'danger' : item.triggerDays === 7 ? 'warning' : 'blue'}">${item.triggerDays === 0 ? '!' : '◷'}</div><div class="alert-copy"><div class="alert-heading"><strong>${esc(typeName(license.licenseTypeId))}</strong><span class="status-pill ${item.triggerDays === 0 ? 'danger' : item.triggerDays === 7 ? 'warning' : 'neutral'}">${kind}</span><span class="muted">${stateLabel}</span></div><p><button class="inline-link" data-alert-branch="${item.branchId?._id || item.branchId}">${esc(branchName(item.branchId))}</button> · פקיעה ${date(license.expiryDate)}</p></div>${archived ? '' : `<div class="alert-actions"><button class="secondary small-btn" data-id="${item._id}" data-alert-action="In_Progress">${item.status === 'In_Progress' ? 'בטיפול ✓' : 'התחל טיפול'}</button><button class="primary small-btn" data-id="${item._id}" data-alert-action="Resolved">סימון כטופל</button></div>`}</article>`;
+};
+
+// ----- משימות כלליות -----
+const taskStatusText = (status) => ({ To_Do: 'לביצוע', In_Progress: 'בטיפול', Done: 'בוצע' }[status] || status);
+const taskStatusClass = (status) => ({ To_Do: 'neutral', In_Progress: 'warning', Done: 'good' }[status] || 'neutral');
+const taskFilters = [['all', 'הכל'], ['To_Do', 'לביצוע'], ['In_Progress', 'בטיפול'], ['Done', 'בוצע']];
+
+const renderTasks = async () => {
+  const isTeam = state.user.role === 'Admin' && state.taskScope === 'team';
+  let tasks;
+  try { tasks = await api(`/api/tasks${isTeam ? '?scope=all' : ''}`); } catch (error) { app.innerHTML = `<section class="panel"><h3>לא ניתן לטעון את המשימות</h3><p>${esc(error.message)}</p><button class="secondary" id="retryTasks">ניסיון חוזר</button></section>`; document.getElementById('retryTasks').onclick = renderTasks; return; }
+  if (!isTeam) state.tasks = tasks;
+  renderHeader();
+  const filtered = state.taskFilter === 'all' ? tasks : tasks.filter((task) => task.status === state.taskFilter);
+  const ordered = [...filtered].sort((a, b) => {
+    const rank = (task) => task.status === 'Done' ? 1 : 0;
+    if (rank(a) !== rank(b)) return rank(a) - rank(b);
+    if (a.status === 'Done') return new Date(b.completedAt || b.updatedAt) - new Date(a.completedAt || a.updatedAt);
+    if (a.dueDate && b.dueDate) return new Date(a.dueDate) - new Date(b.dueDate);
+    if (a.dueDate) return -1;
+    if (b.dueDate) return 1;
+    return new Date(b.createdAt) - new Date(a.createdAt);
+  });
+  const countFor = (filter) => filter === 'all' ? tasks.length : tasks.filter((task) => task.status === filter).length;
+  app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">לוח משימות</div><h2>משימות כלליות לביצוע</h2><p>כל מה שצריך לעשות במעונות, במקום אחד - עם סטטוס טיפול.</p></div><button class="primary" id="newTask">＋ משימה חדשה</button></section><section class="panel">${state.user.role === 'Admin' ? `<div class="tabs" style="margin-bottom:16px"><button class="tab${isTeam ? '' : ' active'}" data-task-scope="mine">המשימות שלי</button><button class="tab${isTeam ? ' active' : ''}" data-task-scope="team">של כל הצוות</button></div>${isTeam ? '<p class="muted" style="margin:0 0 12px">תצוגת צוות לצפייה בלבד - משימה מעדכנים רק על ידי מי שפתח אותה.</p>' : ''}` : ''}<div class="task-filters">${taskFilters.map(([filter, label]) => `<button class="${state.taskFilter === filter ? 'primary' : 'secondary'} small-btn" data-task-filter="${filter}">${label} · ${countFor(filter)}</button>`).join('')}</div><div style="margin-top:10px">${ordered.length ? ordered.map((task) => taskRow(task)).join('') : `<div class="empty-state small"><span>✓</span><h3>${tasks.length ? 'אין משימות בסינון הזה' : 'אין עדיין משימות'}</h3><p>${tasks.length ? 'נסו סינון אחר.' : 'הוסיפו משימה ראשונה כדי לעקוב אחרי מה שצריך לעשות.'}</p></div>`}</div></section>`;
+  document.getElementById('newTask').onclick = () => taskForm();
+  app.querySelectorAll('[data-task-scope]').forEach((button) => button.onclick = () => { state.taskScope = button.dataset.taskScope; renderTasks(); });
+  app.querySelectorAll('[data-task-filter]').forEach((button) => button.onclick = () => { state.taskFilter = button.dataset.taskFilter; renderTasks(); });
+  app.querySelectorAll('[data-task-toggle]').forEach((button) => button.onclick = async () => { try { await api(`/api/tasks/${button.dataset.taskToggle}`, { method: 'PATCH', body: JSON.stringify({ status: button.dataset.done === '1' ? 'To_Do' : 'Done' }) }); await renderTasks(); } catch (error) { toast(error.message, 'danger'); } });
+  app.querySelectorAll('[data-task-edit]').forEach((button) => button.onclick = () => { const task = tasks.find((item) => item._id === button.dataset.taskEdit); if (task) taskForm(task); });
+  app.querySelectorAll('[data-task-delete]').forEach((button) => button.onclick = async () => { if (!confirm('למחוק את המשימה?')) return; try { await api(`/api/tasks/${button.dataset.taskDelete}`, { method: 'DELETE' }); toast('המשימה נמחקה', 'success'); await renderTasks(); } catch (error) { toast(error.message, 'danger'); } });
+};
+
+const taskRow = (task) => {
+  const done = task.status === 'Done';
+  const overdue = task.dueDate && !done && new Date(task.dueDate) < new Date(new Date().toDateString());
+  const branch = task.branchId ? branchName(task.branchId) : 'כל הסניפים';
+  const creator = task.createdBy?.name || '';
+  const meta = done
+    ? `${creator ? `נוצר על ידי ${esc(creator)} · ` : ''}בוצע ${date(task.completedAt)}`
+    : `${creator ? `נוצר על ידי ${esc(creator)} · ` : ''}${esc(branch)}${task.dueDate ? ` · עד ${date(task.dueDate)}` : ''}`;
+  return `<article class="task-row"><button class="task-check${done ? ' done' : ''}${task.editable ? '' : ' readonly'}" ${task.editable ? `data-task-toggle="${task._id}" data-done="${done ? 1 : 0}"` : 'disabled'} title="${task.editable ? (done ? 'סימון כלביצוע' : 'סימון כבוצע') : 'צפייה בלבד - רק מי שפתח את המשימה מעדכן אותה'}" aria-label="${done ? 'סמנו כלביצוע' : 'סמנו כבוצע'}">${done ? '✓' : ''}</button><div class="task-main"><strong>${esc(task.title)}</strong><small class="${overdue ? 'task-overdue' : ''}">${meta}${overdue ? ' · באיחור' : ''}${task.notes ? ` · ${esc(task.notes)}` : ''}</small></div><span class="status-pill ${taskStatusClass(task.status)}">${taskStatusText(task.status)}</span>${task.editable ? `<span class="task-actions"><button class="icon-button" data-task-edit="${task._id}" title="עריכת משימה" aria-label="עריכה">✎</button><button class="icon-button branch-delete" data-task-delete="${task._id}" title="מחיקת משימה" aria-label="מחיקה">🗑</button></span>` : ''}</article>`;
+};
+
+const taskForm = (task = null) => {
+  const m = modal(task ? 'עריכת משימה' : 'משימה חדשה', `<form id="taskForm" class="form-grid"><label>כותרת המשימה<input name="title" required maxlength="200" value="${esc(task?.title || '')}"></label><label>הערות (לא חובה)<input name="notes" maxlength="2000" value="${esc(task?.notes || '')}"></label><div class="two-col"><label>תאריך יעד (לא חובה)<input name="dueDate" type="date" value="${task?.dueDate ? new Date(task.dueDate).toISOString().slice(0, 10) : ''}"></label><label>סניף<select name="branchId"><option value="">כל הסניפים</option>${state.branches.map((branch) => `<option value="${branch._id}"${String(task?.branchId?._id || task?.branchId || '') === String(branch._id) ? ' selected' : ''}>${esc(branch.name)}</option>`).join('')}</select></label></div>${task ? `<label>סטטוס<select name="status">${taskFilters.slice(1).map(([value, label]) => `<option value="${value}"${task.status === value ? ' selected' : ''}>${label}</option>`).join('')}</select></label>` : ''}<button class="primary">${task ? 'שמירת שינויים' : 'יצירת משימה'}</button></form>`);
+  m.wrap.querySelector('form').onsubmit = async (event) => {
+    event.preventDefault(); const form = new FormData(event.currentTarget);
+    const payload = { title: form.get('title'), notes: form.get('notes') || '', dueDate: form.get('dueDate') || null, branchId: form.get('branchId') || null };
+    if (task) payload.status = form.get('status');
+    try {
+      await api(task ? `/api/tasks/${task._id}` : '/api/tasks', { method: task ? 'PATCH' : 'POST', body: JSON.stringify(payload) });
+      m.close(); toast(task ? 'המשימה עודכנה' : 'המשימה נוצרה', 'success'); await renderTasks();
+    } catch (error) { toast(error.message, 'danger'); }
+  };
 };
 
 // ----- שכירות: מעקב תשלומים לרשויות (תיעוד בלבד, ללא העברת כסף) -----
