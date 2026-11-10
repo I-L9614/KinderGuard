@@ -3,7 +3,8 @@ import License from '../models/License.js';
 import Notification from '../models/Notification.js';
 import User from '../models/User.js';
 import logger from '../utils/logger.js';
-import { deleteFileFromS3 } from '../services/s3Service.js';
+import BranchDeletion from '../models/BranchDeletion.js';
+import { deleteLicenseDocument } from '../services/licenseCleanup.js';
 import { getAdminId } from '../utils/access.js';
 
 export const getBranches = async (req, res) => {
@@ -17,52 +18,6 @@ export const createBranch = async (req, res) => {
   const { name, address, maxChildren, status } = req.body;
   const branch = await Branch.create({ adminId: getAdminId(req.user), name, address, maxChildren, status });
   res.status(201).json(branch);
-};
-
-// Deletes one stored document for a license with durable intent:
-// the key is written to pendingFileDeletion BEFORE the destructive storage
-// call, so a crash or later failure never loses the key, and a retry treats a
-// license with pendingFileDeletion as already cleaned (DeleteObject is
-// idempotent on a missing key). Returns true when the document is gone.
-const deleteLicenseDocument = async (license, branchId) => {
-  if (!license.fileUrl) return true;
-  if (license.pendingFileDeletion) {
-    // A previous attempt already deleted this object; just clear the reference.
-    license.fileUrl = '';
-    license.fileName = '';
-    license.pendingFileDeletion = '';
-    await license.save();
-    return true;
-  }
-  license.pendingFileDeletion = license.fileUrl;
-  try {
-    await license.save();
-  } catch (error) {
-    logger.error(`Branch ${branchId} delete: failed to record deletion intent for ${license.fileUrl}: ${error.message}`);
-    return false; // nothing destructive happened; the permit is fully intact
-  }
-  try {
-    await deleteFileFromS3(license.pendingFileDeletion);
-  } catch (error) {
-    logger.error(`Branch ${branchId} delete: storage delete failed for ${license.pendingFileDeletion}: ${error.message}`);
-    license.pendingFileDeletion = '';
-    await license.save().catch((saveError) => logger.error(`Branch ${branchId} delete: failed to roll back deletion intent on ${license._id}: ${saveError.message}`));
-    return false; // permit keeps its document link; retry is safe
-  }
-  license.fileUrl = '';
-  license.fileName = '';
-  const key = license.pendingFileDeletion;
-  license.pendingFileDeletion = '';
-  try {
-    await license.save();
-  } catch (error) {
-    // Reference could not be persisted as cleared. The durable intent key keeps
-    // this recoverable: the next attempt sees pendingFileDeletion and clears it.
-    license.pendingFileDeletion = key;
-    logger.error(`Branch ${branchId} delete: failed to clear file reference on ${license._id}: ${error.message}`);
-    return false;
-  }
-  return true;
 };
 
 export const deleteBranch = async (req, res) => {
@@ -79,7 +34,16 @@ export const deleteBranch = async (req, res) => {
     return res.status(exists ? 409 : 404).json({ message: exists ? 'מחיקת הסניף כבר מתבצעת. נסו שוב בעוד רגע.' : 'הסניף לא נמצא' });
   }
 
+  // Durable evidence of this confirmed deletion: lets scheduled recovery finish
+  // exactly this branch's leftovers if the process dies mid-cascade, and nothing else.
   const releaseGuard = () => Branch.updateOne({ _id: branch._id }, { $set: { deleting: false } });
+  try {
+    await BranchDeletion.findOneAndUpdate({ branchId: branch._id }, { $set: { adminId } }, { upsert: true });
+  } catch (error) {
+    await releaseGuard();
+    throw error;
+  }
+  const dropOperation = () => BranchDeletion.deleteOne({ branchId: branch._id });
 
   // Confirmed cascade: the branch's permits (with history), attached documents
   // and related alerts go with it. Bounded rounds also absorb permits that were
@@ -92,7 +56,7 @@ export const deleteBranch = async (req, res) => {
     const licenses = await License.find({ branchId: branch._id });
     if (!licenses.length) break;
     for (const license of licenses) {
-      if (!(await deleteLicenseDocument(license, branch._id))) { failed = true; break; }
+      if (!(await deleteLicenseDocument(license, `Branch ${branch._id} delete:`))) { failed = true; break; }
       try {
         await Notification.deleteMany({ licenseId: license._id });
         await license.deleteOne();
@@ -110,6 +74,7 @@ export const deleteBranch = async (req, res) => {
   const remaining = await License.countDocuments({ branchId: branch._id });
   if (failed || remaining > 0) {
     await releaseGuard();
+    await dropOperation(); // deletion aborted: no recovery claim on live data
     const reason = failed ? 'תקלת אחסון או מסד נתונים' : 'הסניף השתנה בזמן המחיקה';
     return res.status(502).json({ message: `${reason}: המחיקה לא הושלמה (נמחקו ${deletedLicenses} אישורים, נותרו ${remaining}). הסניף לא נמחק - נסו שוב כדי להשלים.` });
   }
@@ -121,16 +86,19 @@ export const deleteBranch = async (req, res) => {
   // Sweep permits that raced past the guard's creation check and landed while
   // the cascade ran. A permit created after this sweep cannot validate its
   // branch (it no longer exists), so this bounds the race.
+  let sweepPending = 0;
   const stragglers = await License.find({ branchId: branch._id });
   for (const straggler of stragglers) {
-    if (straggler.fileUrl) {
-      try { await deleteFileFromS3(straggler.fileUrl); }
-      catch (error) { logger.error(`Branch ${branch._id} delete: sweep could not delete ${straggler.fileUrl}: ${error.message}`); }
+    if (!(await deleteLicenseDocument(straggler, `Branch ${branch._id} delete sweep:`))) {
+      logger.error(`Branch ${branch._id} delete: sweep kept license ${straggler._id} for deletion recovery`);
+      sweepPending += 1;
+      continue; // recorded operation lets recovery finish exactly this branch; key stays durable
     }
     await Notification.deleteMany({ licenseId: straggler._id });
     await straggler.deleteOne();
     deletedLicenses += 1;
   }
+  if (sweepPending === 0) await dropOperation(); // converged now; otherwise recovery finishes it
 
   res.json({ ok: true, deletedLicenses });
 };

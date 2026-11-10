@@ -2,6 +2,7 @@ import './config/env.js';
 import app from './app.js';
 import connectDB from './config/db.js';
 import { cleanupExpiredRefreshTokens } from './controllers/authController.js';
+import { reconcileBranchDeletions } from './services/licenseCleanup.js';
 import { generateDueNotifications } from './controllers/notificationController.js';
 import { refreshLicenseStatuses } from './controllers/licenseController.js';
 import { fileURLToPath } from 'url';
@@ -28,6 +29,7 @@ export const startServer = async () => {
   const runDailyMaintenance = async () => {
     await refreshLicenseStatuses();
     await generateDueNotifications();
+    await reconcileBranchDeletions();
   };
   runDailyMaintenance().catch((err) => console.error('License maintenance failed:', safeErrorText(err)));
   maintenanceInterval = setInterval(() => {

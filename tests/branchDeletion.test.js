@@ -65,7 +65,8 @@ describe('Branch deletion', () => {
     expect(res.body.message).toContain('לא הושלמה');
     const kept = await License.findById(license._id);
     expect(kept.fileUrl).toBe('licenses/failing-permit.pdf');
-    expect(kept.pendingFileDeletion).toBe('');
+    // the key stays durable so a retry re-attempts the delete; the permit keeps its link
+    expect(kept.pendingFileDeletion).toBe('licenses/failing-permit.pdf');
     const branches = await request(app).get('/api/branches').set('Authorization', `Bearer ${token}`).expect(200);
     expect(branches.body.some((b) => b._id === branch.body._id)).toBe(true);
     // retry converges once storage recovers
@@ -167,9 +168,60 @@ describe('Branch deletion', () => {
     const kept = await License.findById(license._id);
     // the object is gone from storage, the key survived durably, and nothing links falsely
     expect(kept.pendingFileDeletion).toBe('licenses/double-fail.pdf');
-    // retry self-heals from the durable intent and completes
+    // retry must re-issue the delete with the durable key - never trust presence of intent alone
+    s3Mock.resetHistory();
     await request(app).delete(`/api/branches/${branch.body._id}`).set('Authorization', `Bearer ${token}`).expect(200);
+    const retryDeletes = s3Mock.calls().filter((c) => c.args[0] instanceof DeleteObjectCommand);
+    expect(retryDeletes).toHaveLength(1);
+    expect(retryDeletes[0].args[0].input.Key).toBe('licenses/double-fail.pdf');
     expect(await License.countDocuments({ branchId: branch.body._id })).toBe(0);
+  });
+
+  it('recovery finishes a confirmed deletion leftovers, scoped to its recorded operation', async () => {
+    const branch = await request(app).post('/api/branches').set('Authorization', `Bearer ${token}`).send({ name: 'סניף יתום' }).expect(201);
+    const license = await License.create({
+      branchId: branch.body._id, licenseTypeId, issueDate: '2026-01-01', expiryDate: '2027-01-01',
+      fileUrl: 'licenses/orphan.pdf', fileName: 'orphan.pdf', status: 'Valid', createdBy: adminId,
+    });
+    await Notification.create({ branchId: branch.body._id, licenseId: license._id, adminId, triggerDays: 30 });
+    // a pre-existing branchless permit from before this feature - must NOT be touched
+    const legacy = await License.create({
+      branchId: new mongoose.Types.ObjectId(), licenseTypeId, issueDate: '2026-01-01', expiryDate: '2027-01-01',
+      fileUrl: 'licenses/legacy.pdf', fileName: 'legacy.pdf', status: 'Valid', lifecycle: 'Replaced', createdBy: adminId,
+    });
+    // simulate a crash after the branch record was deleted but before cleanup:
+    // the confirmed operation evidence exists, the branch is gone
+    const { default: BranchDeletion } = await import('../src/models/BranchDeletion.js');
+    await BranchDeletion.create({ branchId: branch.body._id, adminId });
+    await Branch.findByIdAndDelete(branch.body._id);
+    s3Mock.resetHistory();
+    const { reconcileBranchDeletions } = await import('../src/services/licenseCleanup.js');
+    const reaped = await reconcileBranchDeletions();
+    expect(reaped).toBe(1);
+    const deletes = s3Mock.calls().filter((c) => c.args[0] instanceof DeleteObjectCommand);
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0].args[0].input.Key).toBe('licenses/orphan.pdf');
+    expect(await License.findById(license._id)).toBeNull();
+    expect(await Notification.countDocuments({ licenseId: license._id })).toBe(0);
+    expect(await BranchDeletion.countDocuments({})).toBe(0); // converged, evidence dropped
+    // unrelated branchless permit without a recorded deletion stays untouched
+    const legacyKept = await License.findById(legacy._id);
+    expect(legacyKept.fileUrl).toBe('licenses/legacy.pdf');
+  });
+
+  it('recovery drops evidence of an aborted deletion without touching live data', async () => {
+    const branch = await request(app).post('/api/branches').set('Authorization', `Bearer ${token}`).send({ name: 'סניף חי' }).expect(201);
+    const license = await License.create({
+      branchId: branch.body._id, licenseTypeId, issueDate: '2026-01-01', expiryDate: '2027-01-01',
+      fileUrl: 'licenses/live.pdf', fileName: 'live.pdf', status: 'Valid', createdBy: adminId,
+    });
+    const { default: BranchDeletion } = await import('../src/models/BranchDeletion.js');
+    await BranchDeletion.create({ branchId: branch.body._id, adminId });
+    const { reconcileBranchDeletions } = await import('../src/services/licenseCleanup.js');
+    await reconcileBranchDeletions();
+    expect(await BranchDeletion.countDocuments({})).toBe(0);
+    const kept = await License.findById(license._id);
+    expect(kept.fileUrl).toBe('licenses/live.pdf');
   });
 
   it('rejects a second delete while one is already running', async () => {
