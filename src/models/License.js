@@ -7,6 +7,7 @@ const licenseSchema = new mongoose.Schema({
   expiryDate: { type: Date, required: true, index: true },
   fileUrl: { type: String, default: '' },
   fileName: { type: String, default: '' },
+  pendingFileDeletion: { type: String, default: '' },
   status: { type: String, enum: ['Valid', 'Expiring_Soon', 'Expired'], default: 'Valid', index: true },
   lifecycle: { type: String, enum: ['Active', 'Replaced'], default: 'Active', index: true },
   replacedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'License', default: null },

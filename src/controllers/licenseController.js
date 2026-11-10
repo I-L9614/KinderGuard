@@ -18,6 +18,7 @@ export const createLicense = async (req, res) => {
   const { branchId, licenseTypeId, issueDate, expiryDate } = req.body;
   const branch = await Branch.findById(branchId);
   if (!hasBranchAccess(req.user, branch)) return res.status(branch ? 403 : 404).json({ message: 'אין גישה לסניף שנבחר' });
+  if (branch.deleting) return res.status(409).json({ message: 'הסניף בתהליך מחיקה. נסו שוב בעוד רגע.' });
   const licenseType = await LicenseType.findOne({ _id: licenseTypeId, adminId: getAdminId(req.user), active: true, $or: [{ branchId: null }, { branchId }] });
   if (!licenseType) return res.status(400).json({ message: 'סוג האישור אינו זמין לסניף שנבחר' });
   if (new Date(expiryDate) < new Date(issueDate)) return res.status(400).json({ message: 'תאריך הפקיעה חייב להיות אחרי תאריך ההנפקה' });

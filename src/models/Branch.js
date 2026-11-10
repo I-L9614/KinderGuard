@@ -6,6 +6,7 @@ const branchSchema = new mongoose.Schema({
   address: { type: String, trim: true },
   maxChildren: { type: Number, min: 0 },
   status: { type: String, enum: ['Active', 'Pending_License', 'Suspended'], default: 'Active' },
+  deleting: { type: Boolean, default: false },
 }, { timestamps: true });
 
 export default mongoose.model('Branch', branchSchema);

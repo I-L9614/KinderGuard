@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 
 const getS3Client = () => {
   const bucket = process.env.S3_BUCKET_NAME;
@@ -42,4 +42,9 @@ export const uploadFileToS3 = async (buffer, fileName, contentType) => {
 export const downloadFileFromS3 = async (key) => {
   const { bucket, client } = getS3Client();
   return client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+};
+
+export const deleteFileFromS3 = async (key) => {
+  const { bucket, client } = getS3Client();
+  return client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
 };
