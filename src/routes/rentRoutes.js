@@ -4,7 +4,7 @@ import {
   listAuthorities, createAuthority, deleteAuthority,
   createAgreement, updateAgreement, closeAgreement,
   markPaymentHanded, markPaymentCleared, rentSummary,
-  listPaymentGroups, createPaymentGroup, markGroupHanded, markGroupCleared, getPaidReport, editPayment, cancelPaymentGroup,
+  listPaymentGroups, createPaymentGroup, markGroupHanded, markGroupCleared, getPaidReport, editPayment, cancelPaymentGroup, revertPaymentStatus, revertGroupStatus,
 } from '../controllers/rentController.js';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 
@@ -25,6 +25,8 @@ router.post('/payment-groups/:id/cleared', asyncHandler(markGroupCleared));
 router.get('/reports/paid', asyncHandler(getPaidReport));
 router.patch('/payments/:id', asyncHandler(editPayment));
 router.post('/payment-groups/:id/cancel', asyncHandler(cancelPaymentGroup));
+router.post('/payment-groups/:id/revert', asyncHandler(revertGroupStatus));
+router.post('/payments/:id/revert', asyncHandler(revertPaymentStatus));
 router.post('/payments/:id/handed', asyncHandler(markPaymentHanded));
 router.post('/payments/:id/cleared', asyncHandler(markPaymentCleared));
 export default router;

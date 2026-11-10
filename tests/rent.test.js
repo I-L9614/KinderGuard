@@ -543,3 +543,62 @@ describe('Rent record corrections with audit trail', () => {
     await request(app).post(`/api/rent/payment-groups/${clearedGroup._id}/cancel`).set(auth()).send({}).expect(409);
   });
 });
+
+describe('Rent status reversal (records-only, audited)', () => {
+  it('reverts a mistakenly cleared transfer to pending, reopens its reminder, audits the event', async () => {
+    const ag = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 1500, frequency: 'monthly', paymentMethod: 'transfer', firstDueDate: daysFromNow(4),
+    }).expect(201);
+    const pay = await RentPayment.findOne({ agreementId: ag.body._id, status: 'Pending' });
+    await generateDueRentReminders();
+    await request(app).post(`/api/rent/payments/${pay._id}/cleared`).set(auth()).expect(200);
+    expect((await RentReminder.findOne({ rentPaymentId: pay._id })).status).toBe('Resolved');
+    const res = await request(app).post(`/api/rent/payments/${pay._id}/revert`).set(auth()).send({ reason: 'סומן בטעות' }).expect(200);
+    expect(res.body.status).toBe('Pending');
+    expect(res.body.clearedAt).toBeNull();
+    expect((await RentReminder.findOne({ rentPaymentId: pay._id })).status).toBe('Open'); // obligation active again
+    const RentAudit = (await import('../src/models/RentAudit.js')).default;
+    const audit = await RentAudit.findOne({ paymentId: pay._id, action: 'revert_payment' });
+    expect(audit.before.status).toBe('Cleared');
+    expect(audit.after.status).toBe('Pending');
+    expect(audit.reason).toBe('סומן בטעות');
+  });
+
+  it('cheque revert returns to handed when a handover was recorded, then to pending', async () => {
+    const ag = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 1700, frequency: 'monthly', paymentMethod: 'cheque', firstDueDate: daysFromNow(8),
+    }).expect(201);
+    const pay = await RentPayment.findOne({ agreementId: ag.body._id, status: 'Pending' });
+    await request(app).post(`/api/rent/payments/${pay._id}/handed`).set(auth()).expect(200);
+    await request(app).post(`/api/rent/payments/${pay._id}/cleared`).set(auth()).expect(200);
+    let res = await request(app).post(`/api/rent/payments/${pay._id}/revert`).set(auth()).send({}).expect(200);
+    expect(res.body.status).toBe('Handed'); // handover really happened, clearing was the mistake
+    expect(res.body.paidAt).not.toBeNull();
+    res = await request(app).post(`/api/rent/payments/${pay._id}/revert`).set(auth()).send({}).expect(200);
+    expect(res.body.status).toBe('Pending');
+    expect(res.body.paidAt).toBeNull();
+    await request(app).post(`/api/rent/payments/${pay._id}/revert`).set(auth()).send({}).expect(409); // nothing to revert
+  });
+
+  it('grouped payment revert is rejected; group revert propagates to all allocations', async () => {
+    const ag = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 2200, frequency: 'monthly', paymentMethod: 'cheque', firstDueDate: daysFromNow(10),
+    }).expect(201);
+    const pay = await RentPayment.findOne({ agreementId: ag.body._id, status: 'Pending' });
+    const g = await request(app).post('/api/rent/payment-groups').set(auth()).send({
+      authorityId, method: 'cheque', dueDate: daysFromNow(10), paymentIds: [pay._id],
+    }).expect(201);
+    await request(app).post(`/api/rent/payment-groups/${g.body._id}/handed`).set(auth()).expect(200);
+    await request(app).post(`/api/rent/payments/${pay._id}/revert`).set(auth()).send({}).expect(409); // must go via group
+    const res = await request(app).post(`/api/rent/payment-groups/${g.body._id}/revert`).set(auth()).send({ reason: 'סומן בטעות' }).expect(200);
+    expect(res.body.status).toBe('Pending');
+    const payment = await RentPayment.findById(pay._id);
+    expect(payment.status).toBe('Pending');
+    expect(payment.paidAt).toBeNull();
+    const RentAudit = (await import('../src/models/RentAudit.js')).default;
+    const audit = await RentAudit.findOne({ groupId: g.body._id, action: 'revert_group' });
+    expect(audit.before.status).toBe('Handed');
+    // the group can be handed again after the mistaken click was undone
+    await request(app).post(`/api/rent/payment-groups/${g.body._id}/handed`).set(auth()).expect(200);
+  });
+});

@@ -6,7 +6,7 @@ import mongoose from 'mongoose';
 const rentAuditSchema = new mongoose.Schema(
   {
     adminId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    action: { type: String, enum: ['edit_payment', 'cancel_group'], required: true, index: true },
+    action: { type: String, enum: ['edit_payment', 'cancel_group', 'revert_payment', 'revert_group'], required: true, index: true },
     paymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'RentPayment', default: null },
     groupId: { type: mongoose.Schema.Types.ObjectId, ref: 'RentPaymentGroup', default: null },
     branchName: { type: String, default: '' },

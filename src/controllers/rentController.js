@@ -555,6 +555,83 @@ export const cancelPaymentGroup = async (req, res) => {
   res.json(group);
 };
 
+// Records-only status reversal for a mistaken click (e.g. marked cleared by
+// accident). The mistaken event is never rewritten or deleted: it stays in
+// RentAudit, and the payment returns to its prior tracking state. Reverting
+// never touches a real bank account or cheque.
+const revertState = (doc) => {
+  // Cleared returns to Handed only when a real handover was recorded (cheques);
+  // transfers never pass through Handed, so they return to Pending.
+  if (doc.status === 'Cleared') return doc.method === 'cheque' && doc.paidAt ? 'Handed' : 'Pending';
+  if (doc.status === 'Handed') return 'Pending';
+  return null;
+};
+
+const reopenReminders = async (paymentIds) => {
+  await RentReminder.updateMany(
+    { rentPaymentId: { $in: paymentIds }, status: 'Resolved' },
+    { status: 'Open', resolvedAt: null, resolvedBy: null },
+  );
+};
+
+export const revertPaymentStatus = async (req, res) => {
+  const payment = await findPayment(req, res);
+  if (!payment) return;
+  if (payment.groupId) return res.status(409).json({ message: 'התשלום שובץ לתשלום מרוכז - ביטול הסימון מתבצע על התשלום המרוכז עצמו' });
+  const target = revertState(payment);
+  if (!target) return res.status(409).json({ message: 'אפשר לבטל סימון רק של תשלום שסומן כנמסר או כנפרע' });
+  const before = { status: payment.status, paidAt: payment.paidAt, clearedAt: payment.clearedAt };
+  payment.status = target;
+  if (target === 'Pending') payment.paidAt = null;
+  payment.clearedAt = null;
+  await payment.save();
+  await reopenReminders([payment._id]);
+  await RentAudit.create({
+    adminId: payment.adminId,
+    action: 'revert_payment',
+    paymentId: payment._id,
+    branchName: payment.branchName,
+    authorityName: payment.authorityName,
+    reason: String(req.body.reason || '').trim(),
+    before,
+    after: { status: payment.status, paidAt: payment.paidAt, clearedAt: payment.clearedAt },
+    createdBy: req.user._id,
+  });
+  res.json(payment);
+};
+
+export const revertGroupStatus = async (req, res) => {
+  const group = await findGroup(req, res);
+  if (!group) return;
+  const target = revertState({ status: group.status, method: group.method, paidAt: group.handedAt });
+  if (!target) return res.status(409).json({ message: 'אפשר לבטל סימון רק של תשלום מרוכז שסומן כנמסר או כנפרע' });
+  const before = { status: group.status, handedAt: group.handedAt, clearedAt: group.clearedAt };
+  group.status = target;
+  if (target === 'Pending') group.handedAt = null;
+  group.clearedAt = null;
+  await group.save();
+  const payments = await RentPayment.find({ groupId: group._id });
+  for (const payment of payments) {
+    if (!['Handed', 'Cleared'].includes(payment.status)) continue;
+    payment.status = target;
+    if (target === 'Pending') payment.paidAt = null;
+    payment.clearedAt = null;
+    await payment.save();
+  }
+  await reopenReminders(payments.map((p) => p._id));
+  await RentAudit.create({
+    adminId: group.adminId,
+    action: 'revert_group',
+    groupId: group._id,
+    authorityName: group.authorityName,
+    reason: String(req.body.reason || '').trim(),
+    before,
+    after: { status: group.status, handedAt: group.handedAt, clearedAt: group.clearedAt, paymentsReverted: payments.length },
+    createdBy: req.user._id,
+  });
+  res.json(group);
+};
+
 // ----- Actual-paid report: what was really paid, per authority and per branch -----
 
 // Payments are the single source of truth: every shekel of a grouped payment
