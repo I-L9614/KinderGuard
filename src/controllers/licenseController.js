@@ -57,8 +57,15 @@ export const createLicense = async (req, res) => {
 export const getLicenses = async (req, res) => {
   const filter = { lifecycle: req.query.history === 'true' ? 'Replaced' : 'Active' };
   const branchFilter = { adminId: getAdminId(req.user) };
-  if (req.user.role === 'Manager') branchFilter._id = { $in: req.user.accessibleBranches };
-  if (req.query.branchId) branchFilter._id = req.query.branchId;
+  if (req.user.role === 'Manager') {
+    // A branch user may only ever list permits of his assigned branches: a
+    // requested branchId narrows that scope, never widens it.
+    const allowed = (req.user.accessibleBranches || []).map(String);
+    if (req.query.branchId && !allowed.includes(String(req.query.branchId))) return res.json([]);
+    branchFilter._id = req.query.branchId || { $in: req.user.accessibleBranches };
+  } else if (req.query.branchId) {
+    branchFilter._id = req.query.branchId;
+  }
   const branches = await Branch.find(branchFilter).select('_id');
   filter.branchId = { $in: branches.map((b) => b._id) };
   const licenses = await License.find(filter).sort({ expiryDate: 1 }).populate('branchId', 'name').populate('licenseTypeId', 'name').populate('replacedBy', 'issueDate expiryDate');
