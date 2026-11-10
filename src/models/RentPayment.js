@@ -23,6 +23,7 @@ const rentPaymentSchema = new mongoose.Schema({
   // happen only through the group, so group and payments never diverge.
   groupId: { type: mongoose.Schema.Types.ObjectId, ref: 'RentPaymentGroup', default: null },
   paidAt: { type: Date, default: null },
+  lastEditedAt: { type: Date, default: null }, // set when a record correction edited this payment; full trail in RentAudit
   clearedAt: { type: Date, default: null },
 }, { timestamps: true });
 

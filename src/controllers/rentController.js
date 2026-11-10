@@ -3,6 +3,7 @@ import RentAgreement from '../models/RentAgreement.js';
 import RentPayment from '../models/RentPayment.js';
 import RentReminder from '../models/RentReminder.js';
 import RentPaymentGroup from '../models/RentPaymentGroup.js';
+import RentAudit from '../models/RentAudit.js';
 import Branch from '../models/Branch.js';
 import { getAdminId } from '../utils/access.js';
 
@@ -454,6 +455,104 @@ export const markGroupCleared = async (req, res) => {
 export const reconcileRentPaymentGroups = async () => {
   const groups = await RentPaymentGroup.find({ status: { $in: ['Pending', 'Handed', 'Cleared'] } });
   for (const group of groups) await propagateGroupState(group);
+};
+
+// ----- Record corrections: edit a pending payment, cancel a grouped payment -----
+// Records only: nothing here touches a real bank account or cheque. Every
+// correction keeps the original values in an append-only RentAudit entry.
+
+export const editPayment = async (req, res) => {
+  const payment = await findPayment(req, res);
+  if (!payment) return;
+  if (payment.status !== 'Pending') return res.status(409).json({ message: 'אפשר לערוך רק תשלום שממתין. תשלום שנמסר או נפרע נשאר לתיעוד.' });
+  const before = { amount: payment.amount, dueDate: payment.dueDate };
+  if (req.body.amount !== undefined) {
+    const amount = Number(req.body.amount);
+    if (!(amount > 0)) return res.status(400).json({ message: 'יש להזין סכום חיובי' });
+    payment.amount = amount;
+  }
+  if (req.body.dueDate !== undefined) {
+    if (!validDate(req.body.dueDate)) return res.status(400).json({ message: 'יש להזין תאריך פרעון תקין' });
+    payment.dueDate = dayStart(req.body.dueDate);
+  }
+  if (payment.amount === before.amount && payment.dueDate.getTime() === new Date(before.dueDate).getTime()) {
+    return res.status(400).json({ message: 'לא בוצע שינוי' });
+  }
+  try {
+    await payment.save(); // the {agreementId, dueDate} unique key rejects a collision
+  } catch (error) {
+    if (error?.code === 11000) return res.status(409).json({ message: 'כבר קיים תשלום לתאריך הזה בהסכם הזה' });
+    throw error;
+  }
+  // A grouped payment's share and the group total must stay equal: the
+  // correction updates the allocation and the total together.
+  if (payment.groupId) {
+    const group = await RentPaymentGroup.findById(payment.groupId);
+    if (group && ['Pending', 'Handed'].includes(group.status)) {
+      const allocation = group.allocations.find((a) => String(a.paymentId) === String(payment._id));
+      if (allocation) {
+        allocation.amount = payment.amount;
+        group.totalAmount = group.allocations.reduce((sum, a) => sum + a.amount, 0);
+        await group.save();
+      }
+    }
+  }
+  payment.lastEditedAt = new Date();
+  await payment.save();
+  await RentAudit.create({
+    adminId: payment.adminId,
+    action: 'edit_payment',
+    paymentId: payment._id,
+    groupId: payment.groupId || null,
+    branchName: payment.branchName,
+    authorityName: payment.authorityName,
+    reason: String(req.body.reason || '').trim(),
+    before,
+    after: { amount: payment.amount, dueDate: payment.dueDate },
+    createdBy: req.user._id,
+  });
+  res.json(payment);
+};
+
+// Cancels the RECORD of a grouped payment (the cheque was never handed, or
+// the handover was cancelled before clearing). The obligations return to
+// ungrouped pending payments; the cancelled group and the original values
+// stay in the audit trail. A cleared group is money that moved - not
+// cancellable here.
+export const cancelPaymentGroup = async (req, res) => {
+  const group = await findGroup(req, res);
+  if (!group) return;
+  if (group.status === 'Cancelled') return res.json(group); // idempotent
+  if (group.status === 'Cleared') return res.status(409).json({ message: 'תשלום שכבר נפרע לא ניתן לביטול - מדובר בכסף שעבר בפועל' });
+  const payments = await RentPayment.find({ groupId: group._id });
+  const before = {
+    status: group.status,
+    totalAmount: group.totalAmount,
+    allocations: group.allocations.map((a) => ({ branchName: a.branchName, amount: a.amount })),
+  };
+  for (const payment of payments) {
+    if (['Pending', 'Handed'].includes(payment.status)) {
+      payment.status = 'Pending';
+      payment.groupId = null;
+      payment.paidAt = null;
+      await payment.save();
+    }
+  }
+  group.status = 'Cancelled';
+  group.cancelledAt = new Date();
+  await group.save();
+  await RentAudit.create({
+    adminId: group.adminId,
+    action: 'cancel_group',
+    groupId: group._id,
+    authorityName: group.authorityName,
+    reason: String(req.body.reason || '').trim(),
+    before,
+    after: { status: 'Cancelled', returnedToPending: payments.length },
+    createdBy: req.user._id,
+  });
+  await generateDueRentReminders(); // re-arms week-before reminders if the payments are due soon
+  res.json(group);
 };
 
 // ----- Actual-paid report: what was really paid, per authority and per branch -----

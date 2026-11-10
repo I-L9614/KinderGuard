@@ -454,3 +454,92 @@ describe('Rent group persistence hardening and report date modes', () => {
     expect(empty.body.authorities).toHaveLength(0);
   });
 });
+
+describe('Rent record corrections with audit trail', () => {
+  it('edits a pending payment, keeps the original in audit, and marks the row', async () => {
+    const ag = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 3300, frequency: 'monthly', paymentMethod: 'transfer', firstDueDate: daysFromNow(14),
+    }).expect(201);
+    const pay = await RentPayment.findOne({ agreementId: ag.body._id, status: 'Pending' });
+    const newDate = daysFromNow(16);
+    const res = await request(app).patch(`/api/rent/payments/${pay._id}`).set(auth()).send({
+      amount: 3600, dueDate: newDate, reason: 'תוקן מול הרשות',
+    }).expect(200);
+    expect(res.body.amount).toBe(3600);
+    expect(res.body.lastEditedAt).not.toBeNull();
+    const RentAudit = (await import('../src/models/RentAudit.js')).default;
+    const audit = await RentAudit.findOne({ paymentId: pay._id, action: 'edit_payment' });
+    expect(audit.before.amount).toBe(3300);
+    expect(audit.after.amount).toBe(3600);
+    expect(audit.reason).toBe('תוקן מול הרשות');
+    // no-change edit is rejected
+    await request(app).patch(`/api/rent/payments/${pay._id}`).set(auth()).send({ amount: 3600, dueDate: newDate }).expect(400);
+    // due-date collision with another scheduled payment is rejected
+    const other = await RentPayment.findOne({ agreementId: ag.body._id, _id: { $ne: pay._id } }).sort({ dueDate: 1 });
+    await request(app).patch(`/api/rent/payments/${pay._id}`).set(auth()).send({ dueDate: other.dueDate }).expect(409);
+    // a non-pending payment cannot be edited
+    await request(app).post(`/api/rent/payments/${pay._id}/cleared`).set(auth()).expect(200);
+    await request(app).patch(`/api/rent/payments/${pay._id}`).set(auth()).send({ amount: 9999 }).expect(409);
+    const stillThere = await RentAudit.countDocuments({ paymentId: pay._id });
+    expect(stillThere).toBe(1);
+  });
+
+  it('editing a grouped payment keeps allocation and total consistent', async () => {
+    const ag = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 4100, frequency: 'monthly', paymentMethod: 'cheque', firstDueDate: daysFromNow(18),
+    }).expect(201);
+    const pay = await RentPayment.findOne({ agreementId: ag.body._id, status: 'Pending' });
+    const g = await request(app).post('/api/rent/payment-groups').set(auth()).send({
+      authorityId, method: 'cheque', dueDate: daysFromNow(18), paymentIds: [pay._id],
+    }).expect(201);
+    await request(app).patch(`/api/rent/payments/${pay._id}`).set(auth()).send({ amount: 4500 }).expect(200);
+    const groups = await request(app).get('/api/rent/payment-groups').set(auth());
+    const updated = groups.body.find((x) => x._id === g.body._id);
+    expect(updated.allocations[0].amount).toBe(4500);
+    expect(updated.totalAmount).toBe(4500);
+  });
+
+  it('cancels a grouped payment record: obligations return to pending, originals audited', async () => {
+    const ag = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId: branchId, authorityId, monthlyAmount: 2900, frequency: 'monthly', paymentMethod: 'cheque', firstDueDate: daysFromNow(6),
+    }).expect(201);
+    const agB = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId: (await request(app).post('/api/branches').set(auth()).send({ name: 'גן נועם' }).expect(201)).body._id,
+      authorityId, monthlyAmount: 3100, frequency: 'monthly', paymentMethod: 'cheque', firstDueDate: daysFromNow(6),
+    }).expect(201);
+    const payA = await RentPayment.findOne({ agreementId: ag.body._id, status: 'Pending' });
+    const payB = await RentPayment.findOne({ agreementId: agB.body._id, status: 'Pending' });
+    const g = await request(app).post('/api/rent/payment-groups').set(auth()).send({
+      authorityId, method: 'cheque', dueDate: daysFromNow(6), paymentIds: [payA._id, payB._id],
+    }).expect(201);
+    await request(app).post(`/api/rent/payment-groups/${g.body._id}/handed`).set(auth()).expect(200);
+    const res = await request(app).post(`/api/rent/payment-groups/${g.body._id}/cancel`).set(auth()).send({ reason: 'הצ\'ק לא נמסר בפועל' }).expect(200);
+    expect(res.body.status).toBe('Cancelled');
+    for (const id of [payA._id, payB._id]) {
+      const p = await RentPayment.findById(id);
+      expect(p.status).toBe('Pending');
+      expect(p.groupId).toBeNull();
+      expect(p.paidAt).toBeNull();
+    }
+    const RentAudit = (await import('../src/models/RentAudit.js')).default;
+    const audit = await RentAudit.findOne({ groupId: g.body._id, action: 'cancel_group' });
+    expect(audit.before.status).toBe('Handed');
+    expect(audit.before.totalAmount).toBe(6000);
+    expect(audit.before.allocations).toHaveLength(2);
+    // idempotent: a second cancel is a no-op
+    await request(app).post(`/api/rent/payment-groups/${g.body._id}/cancel`).set(auth()).send({}).expect(200);
+    expect(await RentAudit.countDocuments({ groupId: g.body._id, action: 'cancel_group' })).toBe(1);
+    // the returned obligations are groupable again
+    const regroup = await request(app).post('/api/rent/payment-groups').set(auth()).send({
+      authorityId, method: 'cheque', dueDate: daysFromNow(6), paymentIds: [payA._id, payB._id],
+    }).expect(201);
+    expect(regroup.body.totalAmount).toBe(6000);
+  });
+
+  it('refuses to cancel a cleared group (money actually moved)', async () => {
+    const groups = await request(app).get('/api/rent/payment-groups').set(auth());
+    const clearedGroup = groups.body.find((g) => g.status === 'Cleared');
+    expect(clearedGroup).toBeDefined();
+    await request(app).post(`/api/rent/payment-groups/${clearedGroup._id}/cancel`).set(auth()).send({}).expect(409);
+  });
+});
