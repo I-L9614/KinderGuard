@@ -84,7 +84,7 @@ const initializeTray = () => {
 
 const createWindow = async () => {
   await startServer();
-  setupIpcHandlers();
+  setupIpcHandlers(() => mainWindow);
 
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -96,6 +96,7 @@ const createWindow = async () => {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      autoplayPolicy: 'no-user-gesture-required',
       preload: path.join(__dirname, 'preload.js'),
     },
   });

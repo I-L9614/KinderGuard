@@ -1,9 +1,8 @@
 const app = document.getElementById('app');
 const headerActions = document.getElementById('header-actions');
-const state = { user: null, branches: [], licenses: [], types: [], alerts: [], page: 'branches', branchId: null, token: null };
+const state = { user: null, branches: [], licenses: [], types: [], alerts: [], page: 'branches', branchId: null, token: null, cardFilter: null };
 const esc = (value = '') => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const date = (value) => value ? new Date(value).toLocaleDateString('he-IL') : '—';
-const safeUrl = (value) => { try { const url = new URL(value); return ['https:', 'http:'].includes(url.protocol) ? url.href : ''; } catch { return ''; } };
 const api = async (url, options = {}) => {
   const headers = { ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}), ...options.headers };
   let response;
@@ -15,6 +14,46 @@ const api = async (url, options = {}) => {
   return data;
 };
 const toast = (text, kind = 'info') => { const node = document.createElement('div'); node.className = `toast toast-${kind}`; node.textContent = text; document.body.append(node); setTimeout(() => node.remove(), 3600); };
+
+// Two-tone chime played alongside the native desktop notification. WebAudio needs
+// no asset file, and the Electron window allows autoplay (set in main.js).
+const playNotificationSound = () => {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = playNotificationSound.ctx || (playNotificationSound.ctx = new Ctx());
+    if (ctx.state === 'suspended') ctx.resume();
+    const now = ctx.currentTime;
+    [880, 1174.66].forEach((freq, index) => {
+      const start = now + index * 0.18;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.22, start + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.16);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + 0.18);
+    });
+  } catch {}
+};
+
+const openLicenseFile = async (licenseId) => {
+  try {
+    const response = await fetch(`/api/licenses/${licenseId}/file`, { headers: state.token ? { Authorization: `Bearer ${state.token}` } : {} });
+    if (!response.ok) {
+      let message = 'לא ניתן לפתוח את הקובץ. נסו שוב.';
+      try { message = (await response.json()).message || message; } catch {}
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank', 'noopener');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (error) { toast(error.message, 'danger'); }
+};
 
 const renderAuth = () => {
   headerActions.innerHTML = '';
@@ -50,13 +89,15 @@ const loadApp = async () => {
     state.types = await api('/api/license-types');
     if (state.branchId && !state.branches.some((b) => b._id === state.branchId)) state.branchId = null;
     render();
-    state.alerts.filter((item) => item.status === 'Open').forEach((item) => {
-      const seen = JSON.parse(localStorage.getItem('seenNotifications') || '[]');
-      if (!seen.includes(item._id)) {
-        window.electronAPI?.notify({ title: 'KinderGuard · תזכורת לחידוש', body: `${typeName(item.licenseId?.licenseTypeId)} · ${branchName(item.branchId)}` });
-        seen.push(item._id); localStorage.setItem('seenNotifications', JSON.stringify(seen.slice(-1000)));
-      }
+    const seen = JSON.parse(localStorage.getItem('seenNotifications') || '[]');
+    const unseen = state.alerts.filter((item) => item.status === 'Open' && !seen.includes(item._id));
+    unseen.forEach((item) => {
+      window.electronAPI?.notify({ title: 'KinderGuard · תזכורת לחידוש', body: `${typeName(item.licenseId?.licenseTypeId)} · ${branchName(item.branchId)}` });
     });
+    if (unseen.length) {
+      playNotificationSound();
+      localStorage.setItem('seenNotifications', JSON.stringify([...seen, ...unseen.map((item) => item._id)].slice(-1000)));
+    }
   } catch (error) {
     if (error.status === 401) { state.user = null; state.token = null; renderAuth(); }
     else { if (!state.user) renderAuth(); toast(error.message, 'danger'); }
@@ -79,10 +120,36 @@ const renderBranches = () => {
   const alerts = currentAlerts();
   const overdue = state.licenses.filter((l) => l.status === 'Expired').length;
   const soon = state.licenses.filter((l) => l.status === 'Expiring_Soon').length;
-  app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">מרכז הבקרה</div><h2>שלום ${esc(state.user.name)}, מה מצב האישורים?</h2><p>סקירה עדכנית של הסניפים והמשימות שדורשות תשומת לב.</p></div>${state.user.role === 'Admin' ? '<button id="newBranch" class="primary">＋ הוספת סניף</button>' : ''}</section><section class="stats-grid"><article class="stat-card"><span class="stat-icon teal">⌂</span><div><strong>${state.branches.length}</strong><small>סניפים</small></div></article><article class="stat-card"><span class="stat-icon amber">◷</span><div><strong>${soon}</strong><small>אישורים לקראת פקיעה</small></div></article><article class="stat-card"><span class="stat-icon coral">!</span><div><strong>${overdue}</strong><small>אישורים שפג תוקפם</small></div></article><article class="stat-card clickable" id="alertsSummary"><span class="stat-icon blue">♧</span><div><strong>${alerts.length}</strong><small>התראות לטיפול</small></div></article></section><section class="section-heading"><div><h3>הסניפים שלך</h3><p>בחרו סניף כדי לראות את כל האישורים וההיסטוריה שלו</p></div><span class="muted">${state.branches.length} סניפים</span></section><section class="branch-grid">${state.branches.length ? state.branches.map((branch) => { const licenses = state.licenses.filter((l) => (l.branchId?._id || l.branchId) === branch._id); const expiring = licenses.filter((l) => l.status === 'Expiring_Soon').length; const expiredCount = licenses.filter((l) => l.status === 'Expired').length; return `<button class="branch-card" data-branch="${branch._id}"><div class="branch-card-top"><span class="branch-symbol">⌂</span><span class="arrow">←</span></div><h3>${esc(branch.name)}</h3><p>${esc(branch.address || 'כתובת לא הוגדרה')}</p><div class="branch-card-bottom"><span>${licenses.length} אישורים</span><span class="branch-signals">${expiredCount ? `<i class="dot danger"></i>${expiredCount} פגו` : ''}${expiring ? `<i class="dot warning"></i>${expiring} לקראת פקיעה` : ''}${!expiredCount && !expiring ? '<i class="dot good"></i>הכול תקין' : ''}</span></div></button>`; }).join('') : `<div class="empty-state"><span>⌂</span><h3>עוד אין סניפים</h3><p>הוסיפו את הסניף הראשון כדי להתחיל לנהל את האישורים שלו.</p></div>`}</section>`;
+  app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">מרכז הבקרה</div><h2>שלום ${esc(state.user.name)}, מה מצב האישורים?</h2><p>סקירה עדכנית של הסניפים והמשימות שדורשות תשומת לב.</p></div>${state.user.role === 'Admin' ? '<button id="newBranch" class="primary">＋ הוספת סניף</button>' : ''}</section><section class="stats-grid"><article class="stat-card clickable" data-card-filter="" role="button" tabindex="0" aria-pressed="${state.cardFilter === null}" title="הצגת כל הסניפים"><span class="stat-icon teal">⌂</span><div><strong>${state.branches.length}</strong><small>סניפים</small></div></article><article class="stat-card clickable${state.cardFilter === 'expiring' ? ' selected' : ''}" data-card-filter="expiring" role="button" tabindex="0" aria-pressed="${state.cardFilter === 'expiring'}" title="הצגת סניפים עם אישורים לקראת פקיעה"><span class="stat-icon amber">◷</span><div><strong>${soon}</strong><small>אישורים לקראת פקיעה</small></div></article><article class="stat-card clickable${state.cardFilter === 'expired' ? ' selected' : ''}" data-card-filter="expired" role="button" tabindex="0" aria-pressed="${state.cardFilter === 'expired'}" title="הצגת סניפים עם אישורים שפג תוקפם"><span class="stat-icon coral">!</span><div><strong>${overdue}</strong><small>אישורים שפג תוקפם</small></div></article><article class="stat-card clickable" id="alertsSummary"><span class="stat-icon blue">♧</span><div><strong>${alerts.length}</strong><small>התראות לטיפול</small></div></article></section><section class="section-heading"><div><h3>הסניפים שלך</h3><p>בחרו סניף כדי לראות את כל האישורים וההיסטוריה שלו</p></div><span class="muted">${state.branches.length} סניפים</span></section>${state.branches.length ? '<div class="search-row"><input type="search" class="search-input" id="branchSearch" placeholder="חיפוש סניף לפי שם או כתובת" aria-label="חיפוש סניף"></div>' : ''}<section class="branch-grid" id="branchGrid">${state.branches.length ? state.branches.map((branch) => { const licenses = state.licenses.filter((l) => (l.branchId?._id || l.branchId) === branch._id); const expiring = licenses.filter((l) => l.status === 'Expiring_Soon').length; const expiredCount = licenses.filter((l) => l.status === 'Expired').length; return `<button class="branch-card" data-branch="${branch._id}" data-search="${esc((branch.name || '') + ' ' + (branch.address || ''))}"><div class="branch-card-top"><span class="branch-symbol">⌂</span><span class="arrow">←</span></div><h3>${esc(branch.name)}</h3><p>${esc(branch.address || 'כתובת לא הוגדרה')}</p><div class="branch-card-bottom"><span>${licenses.length} אישורים</span><span class="branch-signals">${expiredCount ? `<i class="dot danger"></i>${expiredCount} פגו` : ''}${expiring ? `<i class="dot warning"></i>${expiring} לקראת פקיעה` : ''}${!expiredCount && !expiring ? '<i class="dot good"></i>הכול תקין' : ''}</span></div></button>`; }).join('') : `<div class="empty-state"><span>⌂</span><h3>עוד אין סניפים</h3><p>הוסיפו את הסניף הראשון כדי להתחיל לנהל את האישורים שלו.</p></div>`}</section><div class="empty-state" id="noBranchMatches" hidden><span>⌂</span><h3>לא נמצאו סניפים תואמים</h3><p>נסו לשנות את מילות החיפוש.</p></div>`;
   document.getElementById('alertsSummary').onclick = () => { state.page = 'alerts'; render(); };
-  app.querySelectorAll('[data-branch]').forEach((node) => node.onclick = () => { state.branchId = node.dataset.branch; render(); });
+  app.querySelectorAll('[data-branch]').forEach((node) => node.onclick = () => { state.branchId = node.dataset.branch; state.cardFilter = null; render(); });
   document.getElementById('newBranch')?.addEventListener('click', createBranchForm);
+  const branchSearch = document.getElementById('branchSearch');
+  if (branchSearch) branchSearch.oninput = applyBranchCardVisibility;
+  app.querySelectorAll('[data-card-filter]').forEach((card) => {
+    const activate = () => { state.cardFilter = card.dataset.cardFilter || null; render(); };
+    card.onclick = activate;
+    card.onkeydown = (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(); } };
+  });
+  applyBranchCardVisibility();
+};
+
+// Combines the active stat-card filter (expiring/expired/all) with the search box.
+const applyBranchCardVisibility = () => {
+  const query = (document.getElementById('branchSearch')?.value || '').trim().toLowerCase();
+  let visible = 0;
+  app.querySelectorAll('#branchGrid .branch-card').forEach((card) => {
+    const licenses = state.licenses.filter((l) => (l.branchId?._id || l.branchId) === card.dataset.branch);
+    const filterMatch = !state.cardFilter
+      || (state.cardFilter === 'expiring' && licenses.some((l) => l.status === 'Expiring_Soon'))
+      || (state.cardFilter === 'expired' && licenses.some((l) => l.status === 'Expired'));
+    const searchMatch = !query || (card.dataset.search || '').toLowerCase().includes(query);
+    const match = filterMatch && searchMatch;
+    card.style.display = match ? '' : 'none';
+    if (match) visible += 1;
+  });
+  const noMatches = document.getElementById('noBranchMatches');
+  if (noMatches) noMatches.hidden = visible !== 0;
 };
 
 const renderBranch = async () => {
@@ -91,16 +158,30 @@ const renderBranch = async () => {
   let types;
   try { types = await api(`/api/license-types?branchId=${branch._id}`); }
   catch (error) { app.innerHTML = `<button class="back-link" id="back">← כל הסניפים</button><section class="panel"><h3>לא ניתן לטעון את פרטי הסניף</h3><p>${esc(error.message)}</p><button class="secondary" id="retryBranch">ניסיון חוזר</button></section>`; document.getElementById('back').onclick = () => { state.branchId = null; renderBranches(); }; document.getElementById('retryBranch').onclick = renderBranch; return; }
-  app.innerHTML = `<button class="back-link" id="back">← כל הסניפים</button><section class="branch-title"><div><div class="eyebrow">פרטי סניף</div><h2>${esc(branch.name)}</h2><p>${esc(branch.address || 'כתובת לא הוגדרה')}</p></div><div class="button-row">${state.user.role === 'Admin' ? '<button class="secondary" id="addType">＋ סוג אישור</button>' : ''}<button class="primary" id="addLicense">＋ העלאת אישור</button></div></section><section class="stats-grid compact"><article class="stat-card"><div><strong>${licenses.length}</strong><small>אישורים פעילים</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Valid').length}</strong><small>בתוקף</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Expiring_Soon').length}</strong><small>לקראת פקיעה</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Expired').length}</strong><small>פגו</small></div></article></section><section class="panel"><div class="section-heading"><div><h3>אישורי הסניף</h3><p>האישור החדש ביותר מכל סוג מוצג כאן</p></div><span class="muted">${licenses.length} פעילים</span></div>${licenses.length ? `<div class="license-list">${licenses.map((license) => `<article class="license-row"><div class="license-icon ${statusClass(license.status)}">▤</div><div class="license-main"><strong>${esc(typeName(license.licenseTypeId))}</strong><small>תוקף ${date(license.issueDate)} — ${date(license.expiryDate)} ${license.fileName && safeUrl(license.fileUrl) ? `· <a class="file-link" href="${esc(safeUrl(license.fileUrl))}" target="_blank" rel="noopener noreferrer">${esc(license.fileName)}</a>` : ''}</small></div><span class="status-pill ${statusClass(license.status)}">${statusText(license.status)}</span><button class="text-button" data-history="${license._id}">היסטוריה</button></article>`).join('')}</div>` : `<div class="empty-state small"><span>▤</span><h3>אין עדיין אישורים בסניף</h3><p>הגדירו סוג אישור והעלו את המסמך הראשון.</p></div>`}</section><section class="panel"><div class="section-heading"><div><h3>סוגי האישורים לסניף</h3><p>סוגים כלליים וגם סוגים שהוגדרו רק לסניף זה</p></div></div><div class="type-chips">${types.map((t) => `<span class="type-chip">${esc(t.name)}${t.branchId ? '<small>סניף זה</small>' : '<small>כל הסניפים</small>'}</span>`).join('') || '<span class="muted">לא הוגדרו עדיין סוגי אישור</span>'}</div></section><section id="historyPanel"></section>`;
+  app.innerHTML = `<button class="back-link" id="back">← כל הסניפים</button><section class="branch-title"><div><div class="eyebrow">פרטי סניף</div><h2>${esc(branch.name)}</h2><p>${esc(branch.address || 'כתובת לא הוגדרה')}</p></div><div class="button-row">${state.user.role === 'Admin' ? '<button class="secondary" id="addType">＋ סוג אישור</button>' : ''}<button class="primary" id="addLicense">＋ העלאת אישור</button></div></section><section class="stats-grid compact"><article class="stat-card"><div><strong>${licenses.length}</strong><small>אישורים פעילים</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Valid').length}</strong><small>בתוקף</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Expiring_Soon').length}</strong><small>לקראת פקיעה</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Expired').length}</strong><small>פגו</small></div></article></section><section class="panel"><div class="section-heading"><div><h3>אישורי הסניף</h3><p>האישור החדש ביותר מכל סוג מוצג כאן</p></div><span class="muted">${licenses.length} פעילים</span></div>${licenses.length ? `<input type="search" class="search-input" id="licenseSearch" placeholder="חיפוש אישור לפי סוג או שם קובץ" aria-label="חיפוש אישור"><div class="license-list" id="licenseList">${licenses.map((license) => `<article class="license-row" data-search="${esc(typeName(license.licenseTypeId) + ' ' + (license.fileName || ''))}"><div class="license-icon ${statusClass(license.status)}">▤</div><div class="license-main"><strong>${esc(typeName(license.licenseTypeId))}</strong><small>תוקף ${date(license.issueDate)} — ${date(license.expiryDate)} ${license.fileName && license.fileUrl ? `· <button class="file-link link-button" data-open-file="${license._id}">${esc(license.fileName)}</button>` : ''}</small></div><span class="status-pill ${statusClass(license.status)}">${statusText(license.status)}</span><button class="text-button" data-history="${license._id}">היסטוריה</button></article>`).join('')}</div><div class="empty-state small" id="noLicenseMatches" hidden><span>▤</span><h3>לא נמצאו אישורים תואמים</h3><p>נסו לשנות את מילות החיפוש.</p></div>` : `<div class="empty-state small"><span>▤</span><h3>אין עדיין אישורים בסניף</h3><p>הגדירו סוג אישור והעלו את המסמך הראשון.</p></div>`}</section><section class="panel"><div class="section-heading"><div><h3>סוגי האישורים לסניף</h3><p>סוגים כלליים וגם סוגים שהוגדרו רק לסניף זה</p></div></div><div class="type-chips">${types.map((t) => `<span class="type-chip">${esc(t.name)}${t.branchId ? '<small>סניף זה</small>' : '<small>כל הסניפים</small>'}</span>`).join('') || '<span class="muted">לא הוגדרו עדיין סוגי אישור</span>'}</div></section><section id="historyPanel"></section>`;
   document.getElementById('back').onclick = () => { state.branchId = null; renderBranches(); };
   document.getElementById('addLicense').onclick = () => licenseForm(branch, types);
   document.getElementById('addType')?.addEventListener('click', () => licenseTypeForm(branch));
+  app.querySelectorAll('[data-open-file]').forEach((button) => button.onclick = () => openLicenseFile(button.dataset.openFile));
+  const licenseSearch = document.getElementById('licenseSearch');
+  if (licenseSearch) licenseSearch.oninput = () => {
+    const query = licenseSearch.value.trim().toLowerCase();
+    let visible = 0;
+    app.querySelectorAll('#licenseList .license-row').forEach((row) => {
+      const match = !query || (row.dataset.search || '').toLowerCase().includes(query);
+      row.style.display = match ? '' : 'none';
+      if (match) visible += 1;
+    });
+    const noMatches = document.getElementById('noLicenseMatches');
+    if (noMatches) noMatches.hidden = visible !== 0;
+  };
   app.querySelectorAll('[data-history]').forEach((button) => button.onclick = async () => {
     let rows;
     try { rows = await api(`/api/licenses/${button.dataset.history}/history`); } catch (error) { toast(error.message, 'danger'); return; }
     const panel = document.getElementById('historyPanel');
-    panel.innerHTML = `<section class="panel"><div class="section-heading"><div><h3>היסטוריית חידושים · ${esc(typeName(rows[0]?.licenseTypeId))}</h3><p>הגרסאות הקודמות נשמרות לעיון</p></div><button class="icon-button" id="closeHistory">×</button></div><div class="history-list">${rows.map((row) => `<div class="history-row"><span class="history-mark">${row.lifecycle === 'Active' ? 'פעיל' : 'הוחלף'}</span><strong>${date(row.issueDate)} — ${date(row.expiryDate)}</strong><span>${row.fileName && safeUrl(row.fileUrl) ? `<a class="file-link" href="${esc(safeUrl(row.fileUrl))}" target="_blank" rel="noopener noreferrer">${esc(row.fileName)}</a>` : 'ללא קובץ מצורף'}</span><span class="muted">הועלה ${date(row.createdAt)}</span></div>`).join('')}</div></section>`;
+    panel.innerHTML = `<section class="panel"><div class="section-heading"><div><h3>היסטוריית חידושים · ${esc(typeName(rows[0]?.licenseTypeId))}</h3><p>הגרסאות הקודמות נשמרות לעיון</p></div><button class="icon-button" id="closeHistory">×</button></div><div class="history-list">${rows.map((row) => `<div class="history-row"><span class="history-mark">${row.lifecycle === 'Active' ? 'פעיל' : 'הוחלף'}</span><strong>${date(row.issueDate)} — ${date(row.expiryDate)}</strong><span>${row.fileName && row.fileUrl ? `<button class="file-link link-button" data-open-file="${row._id}">${esc(row.fileName)}</button>` : 'ללא קובץ מצורף'}</span><span class="muted">הועלה ${date(row.createdAt)}</span></div>`).join('')}</div></section>`;
     document.getElementById('closeHistory').onclick = () => panel.innerHTML = '';
+    panel.querySelectorAll('[data-open-file]').forEach((button) => button.onclick = () => openLicenseFile(button.dataset.openFile));
   });
 };
 
