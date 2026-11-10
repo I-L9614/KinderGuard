@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 
 const getS3Client = () => {
   const bucket = process.env.S3_BUCKET_NAME;
@@ -13,25 +13,18 @@ const getS3Client = () => {
 
   return {
     bucket,
-    region,
-    endpoint,
     client: new S3Client({
       region,
-      endpoint,
+      endpoint: endpoint || undefined,
       credentials: accessKeyId && secretAccessKey ? { accessKeyId, secretAccessKey } : undefined,
     }),
   };
 };
 
-const getPublicUrl = (key, bucket, region, endpoint) => {
-  if (endpoint) {
-    return `${endpoint.replace(/\/$/, '')}/${key}`;
-  }
-  return `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
-};
-
+// Uploads stay private: no ACL, no public URL. The returned key is stored on the
+// license and files are served only through the authenticated download route.
 export const uploadFileToS3 = async (buffer, fileName, contentType) => {
-  const { bucket, region, endpoint, client } = getS3Client();
+  const { bucket, client } = getS3Client();
 
   const safeFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
   const key = `licenses/${Date.now()}-${safeFileName}`;
@@ -41,9 +34,12 @@ export const uploadFileToS3 = async (buffer, fileName, contentType) => {
     Key: key,
     Body: buffer,
     ContentType: contentType,
-    ACL: 'public-read',
   }));
 
-  return getPublicUrl(key, bucket, region, endpoint);
+  return key;
 };
 
+export const downloadFileFromS3 = async (key) => {
+  const { bucket, client } = getS3Client();
+  return client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+};

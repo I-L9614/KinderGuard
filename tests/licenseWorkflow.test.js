@@ -3,11 +3,18 @@ import path from 'path';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import request from 'supertest';
+import { mockClient } from 'aws-sdk-client-mock';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { Readable } from 'stream';
 import { generateDueNotifications } from '../src/controllers/notificationController.js';
+import License from '../src/models/License.js';
+
+const s3Mock = mockClient(S3Client);
 
 let app;
 let mongoServer;
 let token;
+let adminId;
 let branchId;
 let licenseTypeId;
 
@@ -21,6 +28,7 @@ beforeAll(async () => {
   ({ default: app } = await import('../src/app.js'));
   const admin = await request(app).post('/api/users/register').send({ name: 'Admin', email: `license-${Date.now()}@example.com`, password: 'Password123' }).expect(201);
   token = admin.body.token;
+  adminId = admin.body.id;
   const branch = await request(app).post('/api/branches').set('Authorization', `Bearer ${token}`).send({ name: 'Main Branch' }).expect(201);
   branchId = branch.body._id;
   const type = await request(app).post('/api/license-types').set('Authorization', `Bearer ${token}`).send({ name: 'אישור בטיחות', branchId: null }).expect(201);
@@ -46,6 +54,60 @@ describe('Branch permit workflow', () => {
     const active = await request(app).get(`/api/licenses?branchId=${branchId}`).set('Authorization', `Bearer ${token}`).expect(200);
     expect(active.body).toHaveLength(1);
     expect(active.body[0]._id).toBe(renewal.body._id);
+  }, 20000);
+
+  it('serves attached files only through the authenticated download route', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const branch = await request(app).post('/api/branches').set('Authorization', `Bearer ${token}`).send({ name: 'Files Branch' }).expect(201);
+    const type = await request(app).post('/api/license-types').set('Authorization', `Bearer ${token}`).send({ name: 'אישור עם קובץ', branchId: null }).expect(201);
+    const license = await License.create({
+      branchId: branch.body._id, licenseTypeId: type.body._id, issueDate: today, expiryDate: today,
+      fileUrl: 'licenses/123-permit.pdf', fileName: 'אישור-כיבוי-אש.pdf',
+      status: 'Valid', createdBy: adminId,
+    });
+    s3Mock.on(GetObjectCommand).resolves({
+      Body: Readable.from(['permit-pdf-bytes']),
+      ContentType: 'application/pdf',
+      ContentLength: 16,
+    });
+
+    await request(app).get(`/api/licenses/${license._id}/file`).expect(401);
+
+    const binaryParser = (res, callback) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => callback(null, Buffer.concat(chunks)));
+    };
+    const response = await request(app)
+      .get(`/api/licenses/${license._id}/file`)
+      .set('Authorization', `Bearer ${token}`)
+      .buffer(true)
+      .parse(binaryParser)
+      .expect(200)
+      .expect('Content-Type', /application\/pdf/);
+    expect(response.headers['content-disposition']).toContain('inline');
+    expect(response.headers['content-disposition']).toContain(encodeURIComponent('אישור-כיבוי-אש.pdf'));
+    expect(response.body.toString()).toBe('permit-pdf-bytes');
+
+    const calls = s3Mock.calls();
+    expect(calls.some((call) => call.args[0].input.Key === 'licenses/123-permit.pdf')).toBe(true);
+
+    await License.deleteOne({ _id: license._id });
+  }, 20000);
+
+  it('returns 404 for a license without an attached file', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const branch = await request(app).post('/api/branches').set('Authorization', `Bearer ${token}`).send({ name: 'No File Branch' }).expect(201);
+    const type = await request(app).post('/api/license-types').set('Authorization', `Bearer ${token}`).send({ name: 'אישור בלי קובץ', branchId: null }).expect(201);
+    const license = await License.create({
+      branchId: branch.body._id, licenseTypeId: type.body._id, issueDate: today, expiryDate: today,
+      status: 'Valid', createdBy: adminId,
+    });
+    await request(app)
+      .get(`/api/licenses/${license._id}/file`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(404);
+    await License.deleteOne({ _id: license._id });
   }, 20000);
 
   it('supports branch-specific permit types and rejects types from another branch', async () => {
