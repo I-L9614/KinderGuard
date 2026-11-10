@@ -10,5 +10,5 @@ router.post('/login', [body('email').isEmail(), body('password').isLength({ min:
 router.post('/register', [body('name').trim().notEmpty(), body('email').isEmail(), body('password').isLength({ min: 8 }), handleValidation], asyncHandler(registerUser));
 router.get('/me', asyncHandler(protect), asyncHandler(getCurrentUser));
 router.get('/', asyncHandler(protect), authorizeRoles('Admin'), asyncHandler(listManagedUsers));
-router.post('/', asyncHandler(protect), authorizeRoles('Admin'), [body('name').trim().notEmpty(), body('email').isEmail(), body('password').isLength({ min: 8 }), body('accessibleBranches').isArray(), handleValidation], asyncHandler(createManagedUser));
+router.post('/', asyncHandler(protect), authorizeRoles('Admin'), [body('name').trim().notEmpty(), body('email').isEmail(), body('password').isLength({ min: 8 }), body('role').optional().isIn(['Admin', 'Manager']), body('accessibleBranches').optional().isArray(), handleValidation], asyncHandler(createManagedUser));
 export default router;

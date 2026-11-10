@@ -50,6 +50,40 @@ describe('Account and branch access', () => {
     await request(app).get(`/api/license-types?branchId=${branchB.body._id}`).set('Authorization', `Bearer ${login.body.token}`).expect(404);
   });
 
+  it('adds a co-admin who shares the same data and full permissions', async () => {
+    const coAdminEmail = `coadmin-${Date.now()}@example.com`;
+    const created = await request(app).post('/api/users').set('Authorization', `Bearer ${adminToken}`).send({ name: 'Co Admin', email: coAdminEmail, password: 'Password123', role: 'Admin', accessibleBranches: [] }).expect(201);
+    expect(created.body.role).toBe('Admin');
+
+    const login = await request(app).post('/api/users/login').send({ email: coAdminEmail, password: 'Password123' }).expect(200);
+    expect(login.body.role).toBe('Admin');
+    const coAdminToken = login.body.token;
+
+    // Same tenant: sees all existing branches without any branch assignment
+    const branches = await request(app).get('/api/branches').set('Authorization', `Bearer ${coAdminToken}`).expect(200);
+    expect(branches.body.length).toBeGreaterThanOrEqual(2);
+
+    // /me resolves to the primary admin's tenant id
+    const me = await request(app).get('/api/users/me').set('Authorization', `Bearer ${coAdminToken}`).expect(200);
+    const primaryMe = await request(app).get('/api/users/me').set('Authorization', `Bearer ${adminToken}`).expect(200);
+    expect(String(me.body.adminId)).toBe(String(primaryMe.body.adminId));
+
+    // Full permissions: can create branches and manage users like the primary admin
+    await request(app).post('/api/branches').set('Authorization', `Bearer ${coAdminToken}`).send({ name: 'Co Admin Branch' }).expect(201);
+    const mgrEmail = `mgr-by-coadmin-${Date.now()}@example.com`;
+    await request(app).post('/api/users').set('Authorization', `Bearer ${coAdminToken}`).send({ name: 'Manager By CoAdmin', email: mgrEmail, password: 'Password123', accessibleBranches: [] }).expect(201);
+
+    // Team list shows the co-admin with its role, and the new branch is visible to the primary admin
+    const users = await request(app).get('/api/users').set('Authorization', `Bearer ${adminToken}`).expect(200);
+    expect(users.body.find((u) => u.email === coAdminEmail)?.role).toBe('Admin');
+    const primaryBranches = await request(app).get('/api/branches').set('Authorization', `Bearer ${adminToken}`).expect(200);
+    expect(primaryBranches.body.map((b) => b.name)).toContain('Co Admin Branch');
+
+    // Managers still cannot add users
+    const mgrLogin = await request(app).post('/api/users/login').send({ email: mgrEmail, password: 'Password123' }).expect(200);
+    await request(app).post('/api/users').set('Authorization', `Bearer ${mgrLogin.body.token}`).send({ name: 'Nope', email: `nope-${Date.now()}@example.com`, password: 'Password123', accessibleBranches: [] }).expect(403);
+  });
+
   it('refreshes access token and lists sessions', async () => {
     const refreshed = await request(app).post('/api/auth/refresh').set('Cookie', adminCookie).expect(200);
     const sessions = await request(app).get('/api/auth/sessions').set('Authorization', `Bearer ${refreshed.body.token}`).expect(200);

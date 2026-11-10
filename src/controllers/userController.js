@@ -17,10 +17,17 @@ export const registerUser = async (req, res) => {
 export const createManagedUser = async (req, res) => {
   const { name, email, password, role = 'Manager', accessibleBranches = [] } = req.body;
   if (!['Admin', 'Manager'].includes(role)) return res.status(400).json({ message: 'תפקיד משתמש לא תקין' });
-  if (role === 'Admin') return res.status(400).json({ message: 'אפשר להוסיף משתמש מנהל בלבד' });
   if (await User.exists({ email })) return res.status(400).json({ message: 'כתובת הדוא״ל כבר קיימת' });
 
   const adminId = getAdminId(req.user);
+
+  if (role === 'Admin') {
+    // Co-admin: linked to the same account (adminId), so they see and manage the exact
+    // same branches, licenses and rent data. Full access to every branch by role.
+    const user = await User.create({ name, email, password, role: 'Admin', adminId, accessibleBranches: [] });
+    return res.status(201).json({ id: user._id, name: user.name, email: user.email, role: user.role });
+  }
+
   const branches = await Branch.find({ _id: { $in: accessibleBranches }, adminId });
   if (branches.length !== new Set(accessibleBranches.map(String)).size) {
     return res.status(400).json({ message: 'אחד או יותר מהסניפים שנבחרו אינם שייכים לחשבון' });
