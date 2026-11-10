@@ -203,10 +203,29 @@ describe('Branch deletion', () => {
     expect(deletes[0].args[0].input.Key).toBe('licenses/orphan.pdf');
     expect(await License.findById(license._id)).toBeNull();
     expect(await Notification.countDocuments({ licenseId: license._id })).toBe(0);
-    expect(await BranchDeletion.countDocuments({})).toBe(0); // converged, evidence dropped
+    // evidence is kept for the deleted branch, so a delayed in-flight write is still reaped
+    expect(await BranchDeletion.countDocuments({ branchId: branch.body._id })).toBe(1);
     // unrelated branchless permit without a recorded deletion stays untouched
     const legacyKept = await License.findById(legacy._id);
     expect(legacyKept.fileUrl).toBe('licenses/legacy.pdf');
+  });
+
+  it('recovery reaps a delayed permit that lands after the branch delete completes', async () => {
+    const branch = await request(app).post('/api/branches').set('Authorization', `Bearer ${token}`).send({ name: 'סניף מחיקה מאוחרת' }).expect(201);
+    await request(app).delete(`/api/branches/${branch.body._id}`).set('Authorization', `Bearer ${token}`).expect(200);
+    // a create request that was in flight during the delete lands only now
+    const late = await License.create({
+      branchId: branch.body._id, licenseTypeId, issueDate: '2026-01-01', expiryDate: '2027-01-01',
+      fileUrl: 'licenses/late.pdf', fileName: 'late.pdf', status: 'Valid', createdBy: adminId,
+    });
+    s3Mock.resetHistory();
+    const { reconcileBranchDeletions } = await import('../src/services/licenseCleanup.js');
+    const reaped = await reconcileBranchDeletions();
+    expect(reaped).toBe(1);
+    const deletes = s3Mock.calls().filter((c) => c.args[0] instanceof DeleteObjectCommand);
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0].args[0].input.Key).toBe('licenses/late.pdf');
+    expect(await License.findById(late._id)).toBeNull();
   });
 
   it('recovery drops evidence of an aborted deletion without touching live data', async () => {
@@ -219,7 +238,7 @@ describe('Branch deletion', () => {
     await BranchDeletion.create({ branchId: branch.body._id, adminId });
     const { reconcileBranchDeletions } = await import('../src/services/licenseCleanup.js');
     await reconcileBranchDeletions();
-    expect(await BranchDeletion.countDocuments({})).toBe(0);
+    expect(await BranchDeletion.countDocuments({ branchId: branch.body._id })).toBe(0);
     const kept = await License.findById(license._id);
     expect(kept.fileUrl).toBe('licenses/live.pdf');
   });

@@ -98,7 +98,9 @@ export const deleteBranch = async (req, res) => {
     await straggler.deleteOne();
     deletedLicenses += 1;
   }
-  if (sweepPending === 0) await dropOperation(); // converged now; otherwise recovery finishes it
-
+  // The operation evidence is kept PERMANENTLY for a deleted branch: a permit
+  // upload that was already in flight when the guard landed can still insert
+  // after this request ends, and the scheduled reconciliation only ever reaps
+  // leftovers of recorded operations. Dropping it now could orphan such a write.
   res.json({ ok: true, deletedLicenses });
 };

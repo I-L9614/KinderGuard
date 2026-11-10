@@ -64,14 +64,14 @@ export const reconcileBranchDeletions = async () => {
       continue;
     }
     const leftovers = await License.find({ branchId: operation.branchId });
-    let pending = 0;
     for (const leftover of leftovers) {
-      if (!(await deleteLicenseDocument(leftover, `Deletion recovery ${operation.branchId}:`))) { pending += 1; continue; }
+      if (!(await deleteLicenseDocument(leftover, `Deletion recovery ${operation.branchId}:`))) continue; // key stays durable; next run retries
       await Notification.deleteMany({ licenseId: leftover._id });
       await leftover.deleteOne();
       reaped += 1;
     }
-    if (pending === 0) await operation.deleteOne(); // converged: drop the evidence
+    // Evidence is never dropped for a deleted branch: a delayed in-flight write
+    // can land at any later point and only this record lets the next run reap it.
   }
   if (reaped > 0) logger.info(`Deletion recovery removed ${reaped} leftover license(s)`);
   return reaped;
