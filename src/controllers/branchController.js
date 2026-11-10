@@ -4,6 +4,7 @@ import Notification from '../models/Notification.js';
 import User from '../models/User.js';
 import logger from '../utils/logger.js';
 import BranchDeletion from '../models/BranchDeletion.js';
+import RentAgreement from '../models/RentAgreement.js';
 import { deleteLicenseDocument } from '../services/licenseCleanup.js';
 import { getAdminId } from '../utils/access.js';
 
@@ -44,6 +45,17 @@ export const deleteBranch = async (req, res) => {
     throw error;
   }
   const dropOperation = () => BranchDeletion.deleteOne({ branchId: branch._id });
+
+  // Financial history is never silently erased: a branch with active rent
+  // agreements cannot be deleted. Checked after the guard is claimed, and
+  // agreement creation is blocked while deleting, so no new agreement can
+  // slip in after this check (a raced insert is closed by reconciliation).
+  const activeAgreements = await RentAgreement.countDocuments({ branchId: branch._id, status: 'Active' });
+  if (activeAgreements > 0) {
+    await releaseGuard();
+    await dropOperation();
+    return res.status(409).json({ message: `לסניף יש ${activeAgreements} הסכמי שכירות פעילים. סגרו את ההסכמים במסך השכירות לפני מחיקת הסניף - היסטוריית התשלומים נשמרת.` });
+  }
 
   // Confirmed cascade: the branch's permits (with history), attached documents
   // and related alerts go with it. Bounded rounds also absorb permits that were

@@ -1,9 +1,13 @@
 import License from '../models/License.js';
 import Notification from '../models/Notification.js';
 import Branch from '../models/Branch.js';
+import RentAgreement from '../models/RentAgreement.js';
+import RentPayment from '../models/RentPayment.js';
+import RentReminder from '../models/RentReminder.js';
 import BranchDeletion from '../models/BranchDeletion.js';
 import logger from '../utils/logger.js';
 import { deleteFileFromS3 } from './s3Service.js';
+import { cancelScheduledPayments } from '../controllers/rentController.js';
 
 // Deletes a license's stored document with durable intent. The object key is
 // persisted to pendingFileDeletion BEFORE the destructive storage call and is
@@ -63,6 +67,24 @@ export const reconcileBranchDeletions = async () => {
       await operation.deleteOne(); // aborted deletion; nothing to recover
       continue;
     }
+    // A rent agreement that raced past the deletion guard must not stay
+    // active for a branch that no longer exists: close it, cancel its future
+    // scheduled payments and resolve its reminders. Handed/cleared payment
+    // history is never touched.
+    const racedAgreements = await RentAgreement.find({ branchId: operation.branchId, status: 'Active' });
+    const cancelledPaymentIds = [];
+    for (const agreement of racedAgreements) {
+      agreement.status = 'Closed';
+      agreement.closedAt = new Date();
+      await agreement.save();
+      cancelledPaymentIds.push(...await cancelScheduledPayments(agreement._id));
+    }
+    // Resolve series-end reminders and reminders of cancelled payments only:
+    // a cheque already handed to the authority stays an open obligation.
+    await RentReminder.updateMany(
+      { branchId: operation.branchId, status: { $in: ['Open', 'In_Progress'] }, $or: [{ rentPaymentId: null }, { rentPaymentId: { $in: cancelledPaymentIds } }] },
+      { status: 'Resolved', resolvedAt: new Date() },
+    );
     const leftovers = await License.find({ branchId: operation.branchId });
     for (const leftover of leftovers) {
       if (!(await deleteLicenseDocument(leftover, `Deletion recovery ${operation.branchId}:`))) continue; // key stays durable; next run retries

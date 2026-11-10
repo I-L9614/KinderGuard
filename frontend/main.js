@@ -1,6 +1,6 @@
 const app = document.getElementById('app');
 const headerActions = document.getElementById('header-actions');
-const state = { user: null, branches: [], licenses: [], types: [], alerts: [], page: 'branches', branchId: null, token: null, cardFilter: null };
+const state = { user: null, branches: [], licenses: [], types: [], alerts: [], page: 'branches', branchId: null, token: null, cardFilter: null, rent: null, rentAuthorityFilter: null };
 const esc = (value = '') => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const date = (value) => value ? new Date(value).toLocaleDateString('he-IL') : '—';
 const api = async (url, options = {}) => {
@@ -92,7 +92,11 @@ const loadApp = async () => {
     const seen = JSON.parse(localStorage.getItem('seenNotifications') || '[]');
     const unseen = state.alerts.filter((item) => item.status === 'Open' && !seen.includes(item._id));
     unseen.forEach((item) => {
-      window.electronAPI?.notify({ title: 'KinderGuard · תזכורת לחידוש', body: `${typeName(item.licenseId?.licenseTypeId)} · ${branchName(item.branchId)}` });
+      const isRent = item.kind === 'Rent';
+      const body = isRent
+        ? (item.rentTrigger === 'month_before_series_end' ? `סדרת צ'קים מסתיימת · ${item.branchName || branchName(item.branchId)}` : `תשלום שכירות קרוב · ${item.branchName || branchName(item.branchId)}`)
+        : `${typeName(item.licenseId?.licenseTypeId)} · ${branchName(item.branchId)}`;
+      window.electronAPI?.notify({ title: isRent ? 'KinderGuard · תזכורת תשלום' : 'KinderGuard · תזכורת לחידוש', body });
     });
     if (unseen.length) {
       playNotificationSound();
@@ -110,11 +114,11 @@ const branchName = (id) => state.branches.find((b) => b._id === (id?._id || id))
 const typeName = (id) => state.types.find((t) => t._id === (id?._id || id))?.name || id?.name || 'אישור';
 const currentAlerts = () => state.alerts.filter((a) => ['Open', 'In_Progress'].includes(a.status));
 const renderHeader = () => {
-  headerActions.innerHTML = `<nav class="nav"><button data-page="branches" class="${state.page === 'branches' ? 'selected' : ''}">הסניפים שלי</button><button data-page="alerts" class="${state.page === 'alerts' ? 'selected' : ''}">התראות <b class="nav-count">${currentAlerts().length}</b></button>${state.user.role === 'Admin' ? `<button data-page="settings" class="${state.page === 'settings' ? 'selected' : ''}">הגדרות וצוות</button>` : ''}</nav><div class="user-menu"><span class="user-avatar">${esc(state.user.name.slice(0, 1))}</span><span>${esc(state.user.name)}<small>${state.user.role === 'Admin' ? 'מנהל חשבון' : 'משתמש'}</small></span><button class="icon-button" id="logout" title="התנתקות">↪</button></div>`;
+  headerActions.innerHTML = `<nav class="nav"><button data-page="branches" class="${state.page === 'branches' ? 'selected' : ''}">הסניפים שלי</button><button data-page="alerts" class="${state.page === 'alerts' ? 'selected' : ''}">התראות <b class="nav-count">${currentAlerts().length}</b></button>${state.user.role === 'Admin' ? `<button data-page="rent" class="${state.page === 'rent' ? 'selected' : ''}">שכירות</button><button data-page="settings" class="${state.page === 'settings' ? 'selected' : ''}">הגדרות וצוות</button>` : ''}</nav><div class="user-menu"><span class="user-avatar">${esc(state.user.name.slice(0, 1))}</span><span>${esc(state.user.name)}<small>${state.user.role === 'Admin' ? 'מנהל חשבון' : 'משתמש'}</small></span><button class="icon-button" id="logout" title="התנתקות">↪</button></div>`;
   headerActions.querySelectorAll('[data-page]').forEach((button) => button.onclick = () => { state.page = button.dataset.page; state.branchId = null; render(); });
   document.getElementById('logout').onclick = async () => { try { await api('/api/auth/logout', { method: 'POST' }); } catch {} state.user = null; state.token = null; renderAuth(); };
 };
-const render = () => { renderHeader(); if (state.page === 'alerts') return renderAlerts(); if (state.page === 'settings') return renderSettings(); if (state.branchId) return renderBranch(); return renderBranches(); };
+const render = () => { renderHeader(); if (state.page === 'alerts') return renderAlerts(); if (state.page === 'rent') return renderRent(); if (state.page === 'settings') return renderSettings(); if (state.branchId) return renderBranch(); return renderBranches(); };
 
 const renderBranches = () => {
   const alerts = currentAlerts();
@@ -244,14 +248,190 @@ const licenseForm = (selectedBranch = null, availableTypes = state.types) => {
 
 const renderAlerts = () => {
   const open = state.alerts.filter((a) => ['Open', 'In_Progress'].includes(a.status)); const done = state.alerts.filter((a) => ['Resolved', 'Dismissed'].includes(a.status));
-  app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">מרכז טיפול</div><h2>התראות לחידוש אישורים</h2><p>כל התזכורות מכל הסניפים נשמרות כאן עד לסגירת הטיפול.</p></div><span class="inbox-total">${open.length} ממתינות לטיפול</span></section><section class="panel"><div class="section-heading"><div><h3>ממתינות לטיפול</h3><p>התראות מופיעות 30 יום, 7 ימים וביום הפקיעה</p></div></div>${open.length ? `<div class="alert-list">${open.map((item) => alertCard(item)).join('')}</div>` : `<div class="empty-state small"><span>✓</span><h3>אין התראות פתוחות</h3><p>כל ההתראות טופלו. נעדכן אתכם כשיגיע מועד חידוש.</p></div>`}</section><section class="panel"><details><summary>התראות שטופלו (${done.length})</summary><div class="alert-list archived">${done.map((item) => alertCard(item, true)).join('') || '<p class="muted">אין עדיין התראות שטופלו.</p>'}</div></details></section>`;
+  app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">מרכז טיפול</div><h2>התראות</h2><p>תזכורות חידוש אישורים ותזכורות תשלומי שכירות נשמרות כאן עד לסגירת הטיפול.</p></div><span class="inbox-total">${open.length} ממתינות לטיפול</span></section><section class="panel"><div class="section-heading"><div><h3>ממתינות לטיפול</h3><p>אישורים: 30 יום, 7 ימים וביום הפקיעה · שכירות: שבוע לפני פרעון וחודש לפני סיום סדרת צ'קים</p></div></div>${open.length ? `<div class="alert-list">${open.map((item) => alertCard(item)).join('')}</div>` : `<div class="empty-state small"><span>✓</span><h3>אין התראות פתוחות</h3><p>כל ההתראות טופלו. נעדכן אתכם כשיגיע מועד חידוש.</p></div>`}</section><section class="panel"><details><summary>התראות שטופלו (${done.length})</summary><div class="alert-list archived">${done.map((item) => alertCard(item, true)).join('') || '<p class="muted">אין עדיין התראות שטופלו.</p>'}</div></details></section>`;
   app.querySelectorAll('[data-alert-action]').forEach((button) => button.onclick = async () => { try { await api(`/api/notifications/${button.dataset.id}`, { method: 'PATCH', body: JSON.stringify({ status: button.dataset.alertAction }) }); await loadApp(); } catch (error) { toast(error.message, 'danger'); } });
   app.querySelectorAll('[data-alert-branch]').forEach((button) => button.onclick = () => { state.branchId = button.dataset.alertBranch; state.page = 'branches'; render(); });
+  app.querySelectorAll('[data-alert-rent]').forEach((button) => button.onclick = () => { state.page = 'rent'; render(); });
 };
 const alertCard = (item, archived = false) => {
-  const license = item.licenseId || {}; const kind = item.triggerDays === 30 ? '30 יום מראש' : item.triggerDays === 7 ? 'שבוע מראש' : 'היום';
   const stateLabel = { Open: 'חדש', In_Progress: 'בטיפול', Resolved: 'טופל', Dismissed: 'הושתק' }[item.status];
+  if (item.kind === 'Rent') {
+    const isSeries = item.rentTrigger === 'month_before_series_end';
+    const title = isSeries ? 'סדרת צ\'קים מסתיימת' : 'תשלום שכירות קרוב';
+    const name = esc(item.branchName || branchName(item.branchId));
+    const detail = isSeries
+      ? `${name} · הסדרה מסתיימת ב־${date(item.seriesEndDate)} - מומלץ להנפיק סדרה חדשה`
+      : `${name} · ${money(item.amount)} · מועד פרעון ${date(item.dueDate)}`;
+    return `<article class="alert-card ${isSeries ? 'urgent' : ''}"><div class="alert-marker ${isSeries ? 'warning' : 'blue'}">₪</div><div class="alert-copy"><div class="alert-heading"><strong>${title}</strong><span class="status-pill ${isSeries ? 'warning' : 'neutral'}">${isSeries ? 'חודש מראש' : 'שבוע מראש'}</span><span class="muted">${stateLabel}</span></div><p><button class="inline-link" data-alert-rent="1">${detail}</button></p></div>${archived ? '' : `<div class="alert-actions"><button class="secondary small-btn" data-id="${item._id}" data-alert-action="In_Progress">${item.status === 'In_Progress' ? 'בטיפול ✓' : 'התחל טיפול'}</button><button class="primary small-btn" data-id="${item._id}" data-alert-action="Resolved">סימון כטופל</button></div>`}</article>`;
+  }
+  const license = item.licenseId || {}; const kind = item.triggerDays === 30 ? '30 יום מראש' : item.triggerDays === 7 ? 'שבוע מראש' : 'היום';
   return `<article class="alert-card ${item.triggerDays === 0 ? 'urgent' : ''}"><div class="alert-marker ${item.triggerDays === 0 ? 'danger' : item.triggerDays === 7 ? 'warning' : 'blue'}">${item.triggerDays === 0 ? '!' : '◷'}</div><div class="alert-copy"><div class="alert-heading"><strong>${esc(typeName(license.licenseTypeId))}</strong><span class="status-pill ${item.triggerDays === 0 ? 'danger' : item.triggerDays === 7 ? 'warning' : 'neutral'}">${kind}</span><span class="muted">${stateLabel}</span></div><p><button class="inline-link" data-alert-branch="${item.branchId?._id || item.branchId}">${esc(branchName(item.branchId))}</button> · פקיעה ${date(license.expiryDate)}</p></div>${archived ? '' : `<div class="alert-actions"><button class="secondary small-btn" data-id="${item._id}" data-alert-action="In_Progress">${item.status === 'In_Progress' ? 'בטיפול ✓' : 'התחל טיפול'}</button><button class="primary small-btn" data-id="${item._id}" data-alert-action="Resolved">סימון כטופל</button></div>`}</article>`;
+};
+
+// ----- שכירות: מעקב תשלומים לרשויות (תיעוד בלבד, ללא העברת כסף) -----
+const money = (value) => `₪${Number(value || 0).toLocaleString('he-IL')}`;
+const rentFrequencyText = (value) => ({ monthly: 'חודשי', quarterly: 'רבעוני', annual: 'שנתי', custom: 'מועדים מותאמים' }[value] || value);
+const rentMethodText = (value) => ({ cheque: "צ'ק", transfer: 'העברה בנקאית' }[value] || value);
+const rentStatusPill = (status) => ({ Pending: ['neutral', 'ממתין'], Handed: ['warning', "צ'ק נמסר · טרם נפרע"], Cleared: ['good', 'נפרע'], Cancelled: ['neutral', 'בוטל'] }[status] || ['neutral', status]);
+
+const renderRent = async () => {
+  let data;
+  try { data = await api('/api/rent/summary'); }
+  catch (error) {
+    app.innerHTML = `<section class="panel"><h3>לא ניתן לטעון את נתוני השכירות</h3><p>${esc(error.message)}</p><button class="secondary" id="retryRent">ניסיון חוזר</button></section>`;
+    document.getElementById('retryRent').onclick = renderRent;
+    return;
+  }
+  state.rent = data;
+  const { authorities, agreements, payments, groups = [], totals } = data;
+  const active = agreements.filter((a) => a.status === 'Active');
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const in30 = new Date(today.getTime() + 30 * 86400000);
+  const upcoming = payments.filter((p) => ['Pending', 'Handed'].includes(p.status) && new Date(p.dueDate) <= in30);
+  const handedCount = payments.filter((p) => p.status === 'Handed').length;
+  const annualTotal = active.reduce((sum, a) => sum + (a.annualAmount || 0), 0);
+  const rentAlerts = currentAlerts().filter((a) => a.kind === 'Rent').length;
+  const filterId = state.rentAuthorityFilter || '';
+  const visibleAuthorities = authorities.filter((a) => !filterId || a._id === filterId);
+  const nextPayment = (agreementId) => payments.find((p) => String(p.agreementId) === String(agreementId) && ['Pending', 'Handed'].includes(p.status));
+  const agreementRow = (agreement) => {
+    const next = nextPayment(agreement._id);
+    const [pillClass, pillText] = next ? rentStatusPill(next.status) : ['neutral', 'אין תשלומים קרובים'];
+    const series = agreement.chequeSeries?.seriesEndDate ? ` · הסדרה מסתיימת ${date(agreement.chequeSeries.seriesEndDate)}` : '';
+    return `<article class="license-row">
+      <div class="license-icon ${next ? (next.status === 'Handed' ? 'warning' : '') : ''}">${agreement.paymentMethod === 'cheque' ? '✎' : '⇄'}</div>
+      <div class="license-main"><strong>${esc(agreement.branchId?.name || 'סניף')}</strong><small>${rentFrequencyText(agreement.frequency)} · ${rentMethodText(agreement.paymentMethod)} · ${next ? `פרעון הבא ${date(next.dueDate)} · ${money(next.amount)}` : 'אין מועד קרוב'}${series}</small></div>
+      <span class="amount-cell">${money(agreement.monthlyAmount)} / חודש</span>
+      <span class="status-pill ${pillClass}">${pillText}</span>
+      ${next && agreement.paymentMethod === 'cheque' && next.status === 'Pending' ? `<button class="text-button" data-rent-handed="${next._id}">סמן כנמסר</button>` : ''}
+      ${next ? `<button class="text-button" data-rent-cleared="${next._id}">סמן כנפרע</button>` : ''}
+      <button class="text-button" data-rent-history="${agreement._id}">היסטוריה</button>
+      ${agreement.paymentMethod === 'cheque' ? `<button class="text-button" data-rent-series="${agreement._id}">סדרת צ'קים</button>` : ''}
+      <button class="text-button danger-text" data-rent-close="${agreement._id}">סגירת הסכם</button>
+    </article>`;
+  };
+  const authorityPanel = (authority) => {
+    const list = active.filter((a) => String(a.authorityId?._id || a.authorityId) === authority._id);
+    const total = totals[authority._id] || { monthly: 0, annual: 0 };
+    return `<section class="panel"><div class="section-heading"><div><h3>${esc(authority.name)}</h3><p>${list.length} הסכמים פעילים</p></div><span class="authority-total">סה״כ לרשות: ${money(total.monthly)} לחודש · ${money(total.annual)} לשנה</span></div>${list.length ? `<div class="license-list">${list.map(agreementRow).join('')}</div>` : '<div class="empty-state small"><span>₪</span><h3>אין הסכמים פעילים ברשות</h3><p>הוסיפו הסכם שכירות כדי להתחיל לעקוב.</p></div>'}</section>`;
+  };
+  app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">תשלומי שכירות</div><h2>שכירות לרשויות</h2><p>מעקב תשלומי שכר דירה למועצות לפי מעון. תיעוד בלבד, ללא העברת כסף בפועל.</p></div><div class="button-row"><button class="secondary" id="newAuthority">＋ רשות חדשה</button><button class="secondary" id="newGroup">₪ תשלום מרוכז</button><button class="primary" id="newAgreement">＋ הסכם שכירות</button></div></section>
+  <section class="stats-grid"><article class="stat-card"><span class="stat-icon teal">₪</span><div><strong>${money(annualTotal)}</strong><small>סה״כ שנתי, כל הרשויות</small></div></article><article class="stat-card"><span class="stat-icon amber">${upcoming.length}</span><div><strong>תשלומים קרובים</strong><small>ב־30 הימים הבאים</small></div></article><article class="stat-card"><span class="stat-icon blue">${handedCount}</span><div><strong>צ'קים מופקדים</strong><small>נמסרו, טרם נפרעו</small></div></article><article class="stat-card clickable" id="rentAlertsCard"><span class="stat-icon coral">${rentAlerts}</span><div><strong>תזכורות פעילות</strong><small>מועדי תשלום וסדרות צ'קים</small></div></article></section>
+  ${upcoming.length ? `<section class="panel"><div class="section-heading"><div><h3>תשלומים קרובים</h3><p>30 הימים הבאים, לפי מועד פרעון</p></div></div><div class="license-list">${upcoming.map((p) => { const [cls, txt] = rentStatusPill(p.status); return `<article class="license-row"><div class="license-icon ${p.status === 'Handed' ? 'warning' : ''}">${p.method === 'cheque' ? '✎' : '⇄'}</div><div class="license-main"><strong>${esc(p.branchName)}</strong><small>${esc(p.authorityName)} · ${rentMethodText(p.method)} · פרעון ${date(p.dueDate)}</small></div><span class="amount-cell">${money(p.amount)}</span><span class="status-pill ${cls}">${txt}</span>${p.method === 'cheque' && p.status === 'Pending' ? `<button class="text-button" data-rent-handed="${p._id}">סמן כנמסר</button>` : ''}<button class="text-button" data-rent-cleared="${p._id}">סמן כנפרע</button></article>`; }).join('')}</div></section>` : ''}
+  ${authorities.length ? `<div class="type-chips" style="margin-bottom:18px"><button class="type-chip rent-filter" data-authority="" style="${!filterId ? 'border-color:var(--teal);background:#eaf5f2' : ''}"><strong>כל הרשויות</strong></button>${authorities.map((a) => `<button class="type-chip rent-filter" data-authority="${a._id}" style="${filterId === a._id ? 'border-color:var(--teal);background:#eaf5f2' : ''}">${esc(a.name)}</button>`).join('')}</div>` : ''}
+  ${visibleAuthorities.length ? visibleAuthorities.map(authorityPanel).join('') : `<div class="empty-state"><span>₪</span><h3>${authorities.length ? 'לא נמצאה רשות מתאימה' : 'עוד אין רשויות'}</h3><p>${authorities.length ? 'נסו סינון אחר.' : 'הוסיפו את הרשות הראשונה ואז הגדירו הסכם שכירות לכל מעון.'}</p></div>`}
+  ${groups.length ? `<section class="panel"><div class="section-heading"><div><h3>תשלומים מרוכזים</h3><p>צ'ק או העברה אחת שמחולקת בין מספר מעונות</p></div></div><div class="license-list">${groups.map((g) => { const [cls, txt] = rentStatusPill(g.status); return `<article class="license-row"><div class="license-icon ${g.status === 'Handed' ? 'warning' : ''}">${g.method === 'cheque' ? '✎' : '⇄'}</div><div class="license-main"><strong>${esc(g.authorityName)} · ${money(g.totalAmount)}</strong><small>${rentMethodText(g.method)} · מועד ${date(g.dueDate)} · ${g.allocations.map((a) => `${esc(a.branchName)} ${money(a.amount)}`).join(' + ')}</small></div><span class="status-pill ${cls}">${txt}</span>${g.method === 'cheque' && g.status === 'Pending' ? `<button class="text-button" data-group-handed="${g._id}">סמן כנמסר</button>` : ''}${['Pending', 'Handed'].includes(g.status) ? `<button class="text-button" data-group-cleared="${g._id}">סמן כנפרע</button>` : ''}</article>`; }).join('')}</div></section>` : ''}
+  <section class="panel"><div class="section-heading"><div><h3>דוח תשלומים בפועל</h3><p>כמה שולם בפועל בתקופה נבחרת - לכל רשות ולכל מעון</p></div></div><form id="paidReportForm" class="form-grid"><div class="three-col"><label>מתאריך<input type="date" name="from" value="${new Date().getFullYear()}-01-01" required></label><label>עד תאריך<input type="date" name="to" value="${new Date().getFullYear()}-12-31" required></label><label>רשות<select name="authorityId"><option value="">כל הרשויות</option>${authorities.map((a) => `<option value="${a._id}">${esc(a.name)}</option>`).join('')}</select></label></div><div><button class="secondary small-btn" type="submit">הפק דוח</button></div></form><div id="paidReportResults"></div></section>
+  <section id="rentHistoryPanel"></section>`;
+  document.getElementById('newAuthority').onclick = authorityForm;
+  document.getElementById('newAgreement').onclick = () => rentAgreementForm();
+  document.getElementById('newGroup').onclick = () => rentGroupForm();
+  document.getElementById('paidReportForm').onsubmit = async (e) => {
+    e.preventDefault(); const f = new FormData(e.currentTarget);
+    const params = new URLSearchParams({ from: f.get('from'), to: f.get('to') });
+    if (f.get('authorityId')) params.set('authorityId', f.get('authorityId'));
+    const target = document.getElementById('paidReportResults');
+    try {
+      const report = await api(`/api/rent/reports/paid?${params}`);
+      target.innerHTML = report.authorities.length ? report.authorities.map((a) => `<div class="authority-report"><div class="section-heading"><div><h3>${esc(a.authorityName)}</h3><p>שולם בפועל: ${money(a.clearedTotal)} (צ'קים ${money(a.clearedCheque)} · העברות ${money(a.clearedTransfer)}) · יתרה פתוחה: ${money(a.outstandingTotal)}</p></div></div><div class="history-list">${a.branches.map((b) => `<div class="history-row"><strong>${esc(b.branchName)}</strong><span>שולם ${money(b.clearedTotal)}</span><span class="muted">יתרה פתוחה ${money(b.outstandingTotal)} · ${b.paymentCount} תשלומים</span></div>`).join('')}</div></div>`).join('') : '<p class="muted">אין תשלומים בתקופה שנבחרה.</p>';
+    } catch (error) { target.innerHTML = `<p class="muted">${esc(error.message)}</p>`; }
+  };
+  app.querySelectorAll('[data-group-handed]').forEach((button) => button.onclick = async () => { try { await api(`/api/rent/payment-groups/${button.dataset.groupHanded}/handed`, { method: 'POST' }); toast('התשלום המרוכז סומן כנמסר (טרם נפרע)', 'success'); await loadApp(); await renderRent(); } catch (error) { toast(error.message, 'danger'); } });
+  app.querySelectorAll('[data-group-cleared]').forEach((button) => button.onclick = async () => { try { await api(`/api/rent/payment-groups/${button.dataset.groupCleared}/cleared`, { method: 'POST' }); toast('התשלום המרוכז סומן כנפרע', 'success'); await loadApp(); await renderRent(); } catch (error) { toast(error.message, 'danger'); } });
+  document.getElementById('rentAlertsCard').onclick = () => { state.page = 'alerts'; render(); };
+  app.querySelectorAll('.rent-filter').forEach((chip) => chip.onclick = () => { state.rentAuthorityFilter = chip.dataset.authority || null; renderRent(); });
+  app.querySelectorAll('[data-rent-handed]').forEach((button) => button.onclick = async () => { try { await api(`/api/rent/payments/${button.dataset.rentHanded}/handed`, { method: 'POST' }); toast('סומן: הצ\'ק נמסר לרשות (טרם נפרע)', 'success'); await renderRent(); } catch (error) { toast(error.message, 'danger'); } });
+  app.querySelectorAll('[data-rent-cleared]').forEach((button) => button.onclick = async () => { try { await api(`/api/rent/payments/${button.dataset.rentCleared}/cleared`, { method: 'POST' }); toast('התשלום סומן כנפרע', 'success'); await loadApp(); await renderRent(); } catch (error) { toast(error.message, 'danger'); } });
+  app.querySelectorAll('[data-rent-close]').forEach((button) => button.onclick = () => {
+    const agreement = agreements.find((a) => a._id === button.dataset.rentClose);
+    if (!agreement) return;
+    const m = modal('סגירת הסכם שכירות', `<div class="form-grid"><p>לסגור את הסכם השכירות של <strong>${esc(agreement.branchId?.name || 'הסניף')}</strong>?</p><p class="muted">תשלומים עתידיים מתוכננים יבוטלו. היסטוריית התשלומים ששולמו והופקדו נשמרת לעיון.</p><div class="button-row"><button class="danger" id="confirmCloseAgreement">סגירת ההסכם</button><button class="secondary" data-cancel>ביטול</button></div></div>`);
+    m.wrap.querySelector('[data-cancel]').onclick = m.close;
+    m.wrap.querySelector('#confirmCloseAgreement').onclick = async () => { try { await api(`/api/rent/agreements/${agreement._id}/close`, { method: 'POST' }); m.close(); toast('ההסכם נסגר, ההיסטוריה נשמרה', 'success'); await loadApp(); await renderRent(); } catch (error) { toast(error.message, 'danger'); } };
+  });
+  app.querySelectorAll('[data-rent-series]').forEach((button) => button.onclick = () => {
+    const agreement = agreements.find((a) => a._id === button.dataset.rentSeries);
+    if (agreement) rentSeriesForm(agreement);
+  });
+  app.querySelectorAll('[data-rent-history]').forEach((button) => button.onclick = () => {
+    const agreement = agreements.find((a) => a._id === button.dataset.rentHistory);
+    const panel = document.getElementById('rentHistoryPanel');
+    const rows = payments.filter((p) => String(p.agreementId) === String(agreement._id)).sort((a, b) => new Date(b.dueDate) - new Date(a.dueDate));
+    panel.innerHTML = `<section class="panel"><div class="section-heading"><div><h3>היסטוריית תשלומים · ${esc(agreement.branchId?.name || 'סניף')}</h3><p>${esc(agreement.authorityId?.name || '')} · ${rentFrequencyText(agreement.frequency)} · ${rentMethodText(agreement.paymentMethod)}</p></div><button class="icon-button" id="closeRentHistory">×</button></div><div class="history-list">${rows.length ? rows.map((p) => { const [cls, txt] = rentStatusPill(p.status); const grp = p.groupId ? (state.rent.groups || []).find((g) => String(g._id) === String(p.groupId)) : null; return `<div class="history-row"><span class="history-mark">${txt}</span><strong>${date(p.dueDate)}</strong><span>${money(p.amount)} · ${rentMethodText(p.method)}${grp ? ` · חלק מתשלום מרוכז ${money(grp.totalAmount)}` : ''}</span><span class="muted">${p.clearedAt ? `נפרע ${date(p.clearedAt)}` : p.paidAt ? `נמסר ${date(p.paidAt)}` : 'טרם שולם'}</span><span class="status-pill ${cls}">${txt}</span></div>`; }).join('') : '<p class="muted">אין עדיין תשלומים מתועדים להסכם זה.</p>'}</div></section>`;
+    document.getElementById('closeRentHistory').onclick = () => { panel.innerHTML = ''; };
+    panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
+};
+
+const authorityForm = () => {
+  const m = modal('רשות חדשה', `<form id="authorityForm" class="form-grid"><label>שם הרשות (מועצה / עירייה)<input name="name" required maxlength="120" placeholder="לדוגמה: מועצה אזורית שפיר"></label><button class="primary">שמירת רשות</button></form>`);
+  m.wrap.querySelector('form').onsubmit = async (e) => { e.preventDefault(); const f = new FormData(e.currentTarget); try { await api('/api/rent/authorities', { method: 'POST', body: JSON.stringify({ name: f.get('name') }) }); m.close(); toast('הרשות נוספה', 'success'); await renderRent(); } catch (error) { toast(error.message, 'danger'); } };
+};
+
+const rentAgreementForm = () => {
+  const authorities = state.rent?.authorities || [];
+  if (!state.branches.length) return toast('צריך להגדיר סניף לפני הוספת הסכם שכירות', 'warning');
+  if (!authorities.length) return toast('צריך להגדיר רשות לפני הוספת הסכם שכירות', 'warning');
+  const m = modal('הסכם שכירות חדש', `<form id="rentAgreementForm" class="form-grid">
+    <div class="two-col"><label>מעון (סניף)<select name="branchId">${state.branches.map((b) => `<option value="${b._id}">${esc(b.name)}</option>`).join('')}</select></label>
+    <label>רשות<select name="authorityId">${authorities.map((a) => `<option value="${a._id}">${esc(a.name)}</option>`).join('')}</select></label></div>
+    <div class="two-col"><label>סכום חודשי (₪)<input name="monthlyAmount" type="number" min="0" step="0.01" required></label>
+    <label>סכום שנתי (₪)<input name="annualAmount" type="number" min="0" step="0.01" placeholder="ברירת מחדל: חודשי × 12"><small class="muted">אפשר לשנות - למשל בהסכם לחלק משנה</small></label></div>
+    <div class="two-col"><label>תדירות תשלום<select name="frequency"><option value="monthly">חודשי</option><option value="quarterly">רבעוני</option><option value="annual">שנתי</option><option value="custom">מועדים מותאמים</option></select></label>
+    <label>אמצעי תשלום<select name="paymentMethod"><option value="cheque">צ'ק</option><option value="transfer">העברה בנקאית</option></select></label></div>
+    <label>תאריך פרעון ראשון<input name="firstDueDate" type="date" required></label>
+    <div id="customDatesWrap" hidden><label>מועדי פרעון מותאמים</label><div id="customDates"><input type="date" name="customDate"></div><button type="button" class="secondary small-btn" id="addCustomDate">＋ מועד נוסף</button></div>
+    <fieldset id="seriesWrap"><legend class="check-row"><input type="checkbox" name="hasSeries"> הופקדה סדרת צ'קים מראש</legend><div id="seriesFields" hidden><div class="two-col"><label>מספר צ'קים בסדרה<input name="depositedCount" type="number" min="1"></label><label>תאריך סיום הסדרה<input name="seriesEndDate" type="date"></label></div><p class="muted">חודש לפני סיום הסדרה תופיע תזכורת להנפיק סדרה חדשה.</p></div></fieldset>
+    <button class="primary">שמירת הסכם</button></form>`);
+  const form = m.wrap.querySelector('form');
+  form.elements.frequency.onchange = () => { m.wrap.querySelector('#customDatesWrap').hidden = form.elements.frequency.value !== 'custom'; };
+  form.elements.hasSeries.onchange = () => { m.wrap.querySelector('#seriesFields').hidden = !form.elements.hasSeries.checked; };
+  m.wrap.querySelector('#addCustomDate').onclick = () => { const input = document.createElement('input'); input.type = 'date'; input.name = 'customDate'; m.wrap.querySelector('#customDates').append(input); };
+  form.onsubmit = async (e) => {
+    e.preventDefault(); const f = new FormData(form);
+    const body = {
+      branchId: f.get('branchId'), authorityId: f.get('authorityId'),
+      monthlyAmount: f.get('monthlyAmount'), annualAmount: f.get('annualAmount') || undefined,
+      frequency: f.get('frequency'), paymentMethod: f.get('paymentMethod'), firstDueDate: f.get('firstDueDate'),
+    };
+    if (body.frequency === 'custom') body.customDueDates = f.getAll('customDate').filter(Boolean);
+    if (f.get('hasSeries')) body.chequeSeries = { depositedCount: f.get('depositedCount'), seriesEndDate: f.get('seriesEndDate') };
+    try { await api('/api/rent/agreements', { method: 'POST', body: JSON.stringify(body) }); m.close(); toast('הסכם השכירות נשמר ומועדי התשלום נוצרו', 'success'); await loadApp(); await renderRent(); } catch (error) { toast(error.message, 'danger'); }
+  };
+};
+
+const rentSeriesForm = (agreement) => {
+  const series = agreement.chequeSeries || {};
+  const m = modal(`סדרת צ'קים מופקדת · ${esc(agreement.branchId?.name || 'סניף')}`, `<form id="seriesForm" class="form-grid"><p class="muted">עדכנו כשמפקידים סדרה חדשה. התזכורת תופיע שוב חודש לפני סיום הסדרה החדשה.</p><div class="two-col"><label>מספר צ'קים בסדרה<input name="depositedCount" type="number" min="1" value="${series.depositedCount || ''}"></label><label>תאריך סיום הסדרה<input name="seriesEndDate" type="date" value="${series.seriesEndDate ? new Date(series.seriesEndDate).toISOString().slice(0, 10) : ''}" required></label></div><button class="primary">שמירת סדרה</button></form>`);
+  m.wrap.querySelector('form').onsubmit = async (e) => { e.preventDefault(); const f = new FormData(e.currentTarget); try { await api(`/api/rent/agreements/${agreement._id}`, { method: 'PATCH', body: JSON.stringify({ chequeSeries: { depositedCount: f.get('depositedCount'), seriesEndDate: f.get('seriesEndDate') } }) }); m.close(); toast('סדרת הצ\'קים עודכנה', 'success'); await loadApp(); await renderRent(); } catch (error) { toast(error.message, 'danger'); } };
+};
+
+const rentGroupForm = () => {
+  const { authorities = [], payments = [] } = state.rent || {};
+  const pending = payments.filter((p) => p.status === 'Pending' && !p.groupId);
+  if (!pending.length) return toast('אין תשלומים שממתינים לשיבוץ בתשלום מרוכז', 'warning');
+  const m = modal('תשלום מרוכז לרשות', `<form id="rentGroupForm" class="form-grid"><p class="muted">צ'ק או העברה אחת לרשות, עם חלוקה מדויקת בין המעונות. הסכום הכולל הוא סכום החלוקות.</p><div class="two-col"><label>רשות<select name="authorityId">${authorities.map((a) => `<option value="${a._id}">${esc(a.name)}</option>`).join('')}</select></label><label>אמצעי תשלום<select name="method"><option value="cheque">צ'ק</option><option value="transfer">העברה בנקאית</option></select></label></div><label>מועד התשלום<input name="dueDate" type="date" required></label><div id="groupPayments"></div><div class="authority-total" id="groupTotal">סה״כ: ₪0</div><button class="primary">יצירת תשלום מרוכז</button></form>`);
+  const form = m.wrap.querySelector('form');
+  const listWrap = m.wrap.querySelector('#groupPayments');
+  const totalEl = m.wrap.querySelector('#groupTotal');
+  const renderList = () => {
+    const eligible = pending.filter((p) => String(p.authorityId) === form.elements.authorityId.value && p.method === form.elements.method.value);
+    listWrap.innerHTML = eligible.length ? eligible.map((p) => `<label class="check-row"><input type="checkbox" name="paymentIds" value="${p._id}">${esc(p.branchName)} · ${date(p.dueDate)} · ${money(p.amount)}</label>`).join('') : '<p class="muted">אין תשלומים ממתינים באמצעי תשלום זה לרשות זו.</p>';
+    totalEl.textContent = 'סה״כ: ₪0';
+  };
+  form.elements.authorityId.onchange = renderList;
+  form.elements.method.onchange = renderList;
+  listWrap.onchange = () => {
+    const sum = [...listWrap.querySelectorAll('input:checked')].reduce((acc, input) => acc + (pending.find((p) => String(p._id) === input.value)?.amount || 0), 0);
+    totalEl.textContent = `סה״כ: ${money(sum)}`;
+  };
+  renderList();
+  form.onsubmit = async (e) => {
+    e.preventDefault(); const f = new FormData(form);
+    const paymentIds = f.getAll('paymentIds');
+    if (!paymentIds.length) return toast('יש לבחור לפחות תשלום אחד', 'warning');
+    try { await api('/api/rent/payment-groups', { method: 'POST', body: JSON.stringify({ authorityId: f.get('authorityId'), method: f.get('method'), dueDate: f.get('dueDate'), paymentIds }) }); m.close(); toast('התשלום המרוכז נוצר', 'success'); await loadApp(); await renderRent(); } catch (error) { toast(error.message, 'danger'); }
+  };
 };
 
 const renderSettings = async () => {

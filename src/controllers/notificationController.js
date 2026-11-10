@@ -1,4 +1,5 @@
 import Notification from '../models/Notification.js';
+import RentReminder from '../models/RentReminder.js';
 import License from '../models/License.js';
 import Branch from '../models/Branch.js';
 import { getAdminId } from '../utils/access.js';
@@ -37,11 +38,19 @@ export const listNotifications = async (req, res) => {
   if (req.query.status) filter.status = req.query.status;
   if (req.user.role === 'Manager') filter.branchId = { $in: req.user.accessibleBranches };
   const items = await Notification.find(filter).sort({ createdAt: -1 }).populate('branchId', 'name').populate({ path: 'licenseId', populate: { path: 'licenseTypeId', select: 'name' } });
-  res.json(items);
+  // Rent reminders share this inbox; they carry kind: 'Rent' so the frontend
+  // renders and routes them differently from license alerts.
+  const rentItems = await RentReminder.find(filter).populate('branchId', 'name');
+  const merged = [
+    ...items.map((item) => ({ ...item.toObject(), kind: 'License' })),
+    ...rentItems.map((item) => ({ ...item.toObject(), kind: 'Rent' })),
+  ].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  res.json(merged);
 };
 
 export const updateNotification = async (req, res) => {
-  const notification = await Notification.findOne({ _id: req.params.id, adminId: getAdminId(req.user), ...(req.user.role === 'Manager' ? { branchId: { $in: req.user.accessibleBranches } } : {}) });
+  const scope = { _id: req.params.id, adminId: getAdminId(req.user), ...(req.user.role === 'Manager' ? { branchId: { $in: req.user.accessibleBranches } } : {}) };
+  const notification = (await Notification.findOne(scope)) || (await RentReminder.findOne(scope));
   if (!notification) return res.status(404).json({ message: 'ההתראה לא נמצאה' });
   if (!['In_Progress', 'Resolved', 'Dismissed', 'Open'].includes(req.body.status)) return res.status(400).json({ message: 'מצב טיפול לא תקין' });
   notification.status = req.body.status;

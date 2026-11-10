@@ -10,6 +10,7 @@ import userRoutes from './routes/userRoutes.js';
 import licenseRoutes from './routes/licenseRoutes.js';
 import licenseTypeRoutes from './routes/licenseTypeRoutes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
+import rentRoutes from './routes/rentRoutes.js';
 import { errorHandler, notFound } from './middleware/errorMiddleware.js';
 import { applySecurityMiddleware } from './middleware/securityMiddleware.js';
 import logger from './utils/logger.js';
@@ -52,6 +53,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/licenses', licenseRoutes);
 app.use('/api/license-types', licenseTypeRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/rent', rentRoutes);
 app.use('/api/auth', authRoutes);
 
 if (fs.existsSync(frontendPath)) {

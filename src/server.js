@@ -4,6 +4,7 @@ import connectDB from './config/db.js';
 import { cleanupExpiredRefreshTokens } from './controllers/authController.js';
 import { reconcileBranchDeletions } from './services/licenseCleanup.js';
 import { generateDueNotifications } from './controllers/notificationController.js';
+import { scheduleAllRentPayments, generateDueRentReminders } from './controllers/rentController.js';
 import { refreshLicenseStatuses } from './controllers/licenseController.js';
 import { fileURLToPath } from 'url';
 
@@ -29,6 +30,8 @@ export const startServer = async () => {
   const runDailyMaintenance = async () => {
     await refreshLicenseStatuses();
     await generateDueNotifications();
+    await scheduleAllRentPayments();
+    await generateDueRentReminders();
     await reconcileBranchDeletions();
   };
   runDailyMaintenance().catch((err) => console.error('License maintenance failed:', safeErrorText(err)));
