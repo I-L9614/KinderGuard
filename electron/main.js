@@ -1,10 +1,11 @@
-import { app, BrowserWindow, Tray, Menu, nativeImage, dialog, shell } from 'electron';
+import { app, BrowserWindow, Tray, Menu, nativeImage, dialog } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 import { setupIpcHandlers, setupUpdateIpcHandlers } from './ipc.js';
 import { createUpdateController, startUpdateScheduling } from './updater.js';
+import { resolveRunMode, isAllowedNavigation } from './runMode.js';
 
 // The embedded server's configuration (.env with MONGO_URI, JWT_SECRET and
 // the S3 settings) lives in the per-user data folder, outside the install
@@ -22,6 +23,10 @@ const hasServerConfig = fs.existsSync(path.join(configDir, '.env')) || fs.exists
 // startup-error dialog.
 let startServer = null;
 let stopServer = async () => {};
+
+// embedded = local .env -> own loopback server; client = no secrets in the
+// install -> the hosted KinderGuard server over HTTPS.
+const runMode = resolveRunMode({ hasServerConfig });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -139,7 +144,7 @@ const initializeTray = () => {
 };
 
 const createWindow = async () => {
-  await startServer();
+  if (startServer) await startServer();
   setupIpcHandlers(() => mainWindow);
 
   mainWindow = new BrowserWindow({
@@ -159,6 +164,41 @@ const createWindow = async () => {
 
   mainWindow.setMenuBarVisibility(false);
 
+  // Navigation lockdown: the window may only ever show the app's own origin
+  // (the embedded loopback server or the hosted server). This is what makes
+  // loading a remote URL in client mode safe: no external page, redirect,
+  // popup or permission prompt can take over the window.
+  const navigationGuard = (event, targetUrl) => {
+    if (!isAllowedNavigation(targetUrl, runMode.appUrl)) event.preventDefault();
+  };
+  mainWindow.webContents.on('will-navigate', navigationGuard);
+  mainWindow.webContents.on('will-redirect', navigationGuard);
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+  mainWindow.webContents.session.setPermissionCheckHandler(() => false);
+
+  // Client mode needs the internet: a main-frame load failure (offline, or
+  // the hosted server cold-starting after sleep) gets a Hebrew retry dialog
+  // instead of Chromium's English error page.
+  if (runMode.mode === 'client') {
+    mainWindow.webContents.on('did-fail-load', async (_event, errorCode, _description, _url, isMainFrame) => {
+      if (!isMainFrame || errorCode === -3) return; // -3: aborted by our own navigation guard
+      const choice = await dialog.showMessageBox({
+        type: 'error',
+        title: 'אין חיבור לשרת',
+        message: 'לא ניתן להתחבר לשרת KinderGuard.',
+        detail: 'בדקו את חיבור האינטרנט ונסו שוב. אם השרת היה במצב שינה, הטעינה הראשונה יכולה לקחת עד כדקה. אם הבעיה נמשכת, פנו למנהל המערכת.',
+        buttons: ['ניסיון חוזר', 'סגירה'],
+      });
+      if (choice.response === 0) {
+        mainWindow.loadURL(runMode.appUrl);
+      } else {
+        isQuitting = true;
+        app.quit();
+      }
+    });
+  }
+
   // Bridge diagnostics: if the preload fails to load (e.g. it stops being
   // CJS) window.electronAPI never appears and in-app features die quietly.
   // Record both outcomes in userData so tests and support can tell.
@@ -176,9 +216,10 @@ const createWindow = async () => {
     }
   });
 
-  // 127.0.0.1, not 'localhost': the server binds IPv4 loopback only, and on
-  // some Windows machines localhost resolves to ::1 first.
-  mainWindow.loadURL('http://127.0.0.1:4000');
+  // Embedded: 127.0.0.1, not 'localhost' - the server binds IPv4 loopback
+  // only, and on some Windows machines localhost resolves to ::1 first.
+  // Client: the hosted server URL from runMode.
+  mainWindow.loadURL(runMode.appUrl);
 
   mainWindow.once('ready-to-show', () => {
     if (!process.argv.includes('--hidden')) {
@@ -226,29 +267,19 @@ app.whenReady().then(async () => {
     app.setAppUserModelId('com.kinderguard.desktop');
   }
 
-  // First launch after installing: without the configuration file the app
-  // cannot start. Say exactly what is missing and where it goes, and offer
-  // to open that folder.
-  if (!hasServerConfig) {
+  // Customer installs carry no .env and no secrets: they run in client mode
+  // and load the hosted server, like opening the website. The developer's
+  // machine has a local .env and keeps running its own embedded server.
+  // The v0.2.4 crash happened when the server module was imported before
+  // this gate; the import stays deferred and embedded-only.
+  if (runMode.mode === 'client') {
     fs.mkdirSync(configDir, { recursive: true });
-    // Marker for the packaged first-launch test: proves this dialog was
-    // reached (the v0.2.4 crash happened before it, leaving no marker).
-    fs.writeFileSync(path.join(configDir, '.first-run-setup-shown'), new Date().toISOString());
-    const choice = await dialog.showMessageBox({
-      type: 'info',
-      title: 'נדרש קובץ הגדרות',
-      message: 'KinderGuard צריך את קובץ ההגדרות (.env) כדי לפעול.',
-      detail: `העתיקו את קובץ ה-.env שלכם (עם MONGO_URI, JWT_SECRET והגדרות ה-S3) אל התיקייה:\n${configDir}\n\nאם התקנתם בעבר והקובץ קיים שם, פשוט הפעילו מחדש. בלחיצה על \"פתיחת התיקייה\" התיקייה תיפתח כדי שתוכלו להעתיק אליה את הקובץ.`,
-      buttons: ['פתיחת התיקייה', 'סגירה'],
-    });
-    if (choice.response === 0) {
-      await shell.openPath(configDir);
-    }
-    app.quit();
-    return;
+    // Marker for the packaged first-launch test: proves client mode was
+    // reached (a startup crash before this point leaves no marker).
+    fs.writeFileSync(path.join(configDir, '.client-mode'), runMode.appUrl);
+  } else {
+    ({ startServer, stopServer } = await import('../src/server.js'));
   }
-
-  ({ startServer, stopServer } = await import('../src/server.js'));
   initializeTray();
   await createWindow();
   setAutoLaunch();

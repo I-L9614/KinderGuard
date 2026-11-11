@@ -10,6 +10,7 @@
 import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import http from 'http';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import os from 'os';
 
@@ -41,28 +42,42 @@ const productName = srcPkg.build?.productName || srcPkg.productName || srcPkg.na
 if (productName !== 'KinderGuard') fail(`unexpected productName: ${productName}`);
 ok(`packaged ${packed}, productName=${productName} version=${srcPkg.version} (userData = %APPDATA%\\KinderGuard)`);
 
-// First-launch regression (the v0.2.4 crash): with NO .env anywhere, the
-// packaged app must reach the Hebrew setup dialog instead of dying with an
-// uncaught "Missing required environment variables" in the main process. The
-// dialog path writes a marker file; the old crash never produced one.
+// First-launch regression (the v0.2.4 crash) and the customer-install flow:
+// with NO .env anywhere, the packaged app must enter client mode - no
+// secrets in the installer - and load the hosted server URL, instead of
+// dying with an uncaught "Missing required environment variables" crash or
+// demanding a .env the customer does not have. A local stub server stands in
+// for the hosted one so the smoke never depends on the real deployment.
+const stubHits = [];
+const stub = http.createServer((req, res) => {
+  stubHits.push(req.url);
+  res.writeHead(200, { 'Content-Type': 'text/html' });
+  res.end('<html><body>KinderGuard hosted stub</body></html>');
+});
+await new Promise((resolve) => stub.listen(0, '127.0.0.1', resolve));
+const stubUrl = `http://127.0.0.1:${stub.address().port}`;
+
 const userData = path.join(process.env.APPDATA, 'KinderGuard');
 fs.mkdirSync(userData, { recursive: true });
 const envFile = path.join(userData, '.env');
-const firstRunMarker = path.join(userData, '.first-run-setup-shown');
+const clientMarker = path.join(userData, '.client-mode');
 const envBackup = fs.existsSync(envFile) ? fs.readFileSync(envFile) : null;
 fs.rmSync(envFile, { force: true });
-fs.rmSync(firstRunMarker, { force: true });
-const firstRun = spawn(exe, [], { stdio: 'ignore' });
+fs.rmSync(clientMarker, { force: true });
+const firstRun = spawn(exe, [], { stdio: 'ignore', env: { ...process.env, KINDERGUARD_SERVER_URL: stubUrl } });
 let markerSeen = false;
-for (let i = 0; i < 15 && !markerSeen; i++) {
+for (let i = 0; i < 30 && !markerSeen; i++) {
   await sleep(2000);
   if (firstRun.exitCode !== null) break;
-  markerSeen = fs.existsSync(firstRunMarker);
+  markerSeen = fs.existsSync(clientMarker) && stubHits.length > 0;
 }
 firstRun.kill();
 await sleep(1000);
-if (!markerSeen) fail('first launch without .env did not reach the setup dialog (uncaught startup crash?)');
-ok('first launch without .env reaches the Hebrew setup dialog (no uncaught env crash)');
+stub.close();
+if (!markerSeen) fail('first launch without .env did not reach client mode and load the server URL (uncaught startup crash?)');
+if (fs.readFileSync(clientMarker, 'utf8') !== stubUrl) fail('.client-mode marker does not record the server URL');
+if (fs.existsSync(path.join(userData, '.first-run-setup-shown'))) fail('the old missing-config dialog appeared for a customer install');
+ok('first launch without .env enters client mode and loads the hosted server URL (no env crash, no config demand)');
 
 // Bad-config regression: a .env that IS present but points at an unreachable
 // MongoDB must land in the Hebrew startup-error dialog (marker file), not in

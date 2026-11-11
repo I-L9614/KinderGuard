@@ -23,6 +23,11 @@ const __dirname = path.dirname(__filename);
 const frontendPath = path.resolve(__dirname, '../frontend');
 
 const app = express();
+// Hosted deployments (Render and similar) sit behind a reverse proxy that
+// sets X-Forwarded-For. express-rate-limit refuses to run when that header
+// arrives without trust proxy configured, so hosted deploys set TRUST_PROXY=1.
+// Desktop runs bind loopback directly and keep the default (no trust).
+if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
 applySecurityMiddleware(app);
 
 const allowedOrigin = process.env.CORS_ORIGIN || '*';
