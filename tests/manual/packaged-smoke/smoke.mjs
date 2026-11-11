@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import http from 'http';
 import { MongoMemoryServer } from 'mongodb-memory-server';
+import { captureUiEvidence } from '../lib/ui-evidence.mjs';
 import os from 'os';
 
 const fail = (msg) => { console.error('SMOKE FAIL: ' + msg); process.exit(1); };
@@ -223,76 +224,6 @@ try {
   captureScreen('packaged-window.png');
   ok('real packaged window captured (dist/packaged-window.png) - top bar shows the update button');
 
-  // Payer + branch-contacts UI (v0.3.1): seed a council payer, a private
-  // payer and a branch with full contact details through the real API against
-  // the in-memory DB, reload so the renderer state picks them up, then prove
-  // the new UI renders in the packaged window: manager line on the branch
-  // card, contacts+payer panel on the branch page, payer dropdown with
-  // (פרטי) options in the branch form, and payer chips on the rent page.
-  const seed = await evalJs(`
-    const t = await (await fetch('/api/auth/refresh', { method: 'POST' })).json();
-    const H = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + t.token };
-    const council = await (await fetch('/api/rent/authorities', { method: 'POST', headers: H, body: JSON.stringify({ name: 'מועצת בדיקת עשן', type: 'council' }) })).json();
-    const priv = await (await fetch('/api/rent/authorities', { method: 'POST', headers: H, body: JSON.stringify({ name: 'גן פרטי לבדיקת עשן', type: 'private' }) })).json();
-    const br = await (await fetch('/api/branches', { method: 'POST', headers: H, body: JSON.stringify({ name: 'סניף בדיקת עשן', address: 'רחוב הבדיקה 7, תל אביב', managerName: 'מנהלת הבדיקה', phone: '050-1234567', emails: 'smoke@test.local', authorityId: council._id }) })).json();
-    return { council: council._id, priv: priv._id, privName: priv.name, branch: br._id };`);
-  if (!seed.council || !seed.priv || !seed.branch) fail('seeding payer/branch through the API failed: ' + JSON.stringify(seed));
-  ok('seeded council payer, private payer and a branch with contacts through the real API');
-  await evalJs('location.reload(); return true;');
-  let backIn = false;
-  for (let i = 0; i < 30 && !backIn; i++) {
-    await sleep(2000);
-    backIn = await evalJs('return !!document.getElementById("logout")').catch(() => false);
-  }
-  if (!backIn) fail('packaged window did not come back after reload');
-  ok('renderer re-authenticated after reload (refresh-cookie session)');
-
-  // Branch card carries the manager line.
-  let cardLine = false;
-  for (let i = 0; i < 15 && !cardLine; i++) {
-    await sleep(1500);
-    cardLine = await evalJs('return document.body.innerText.includes("מנהלת הבדיקה")');
-  }
-  if (!cardLine) fail('branch card does not show the manager line');
-  captureScreen('branch-card-contacts.png');
-  ok('branch card shows the manager/phone line (dist/branch-card-contacts.png)');
-
-  // Branch detail: contacts + payer panel.
-  await evalJs(`document.querySelector('[data-branch="${seed.branch}"]').click(); return true;`);
-  let panelSeen = false;
-  for (let i = 0; i < 15 && !panelSeen; i++) {
-    await sleep(1500);
-    panelSeen = await evalJs('return document.body.innerText.includes("אנשי קשר ושיוך") && document.body.innerText.includes("מועצת בדיקת עשן")');
-  }
-  if (!panelSeen) fail('branch detail contacts+payer panel did not render');
-  captureScreen('branch-detail-contacts.png');
-  ok('branch detail shows the contacts+payer panel (dist/branch-detail-contacts.png)');
-
-  // Branch edit form: contact fields and the payer dropdown with (פרטי).
-  await evalJs('document.getElementById("editBranch").click(); return true;');
-  await sleep(1200);
-  const formCheck = await evalJs(`
-    const sel = document.querySelector('#branchForm select[name="authorityId"]');
-    const mgr = document.querySelector('#branchForm input[name="managerName"]');
-    return { hasSelect: !!sel, hasPrivate: sel ? [...sel.options].some((o) => o.textContent.includes('(פרטי)')) : false, selected: sel ? sel.options[sel.selectedIndex].textContent : null, mgrValue: mgr ? mgr.value : null };`);
-  if (!formCheck.hasSelect || !formCheck.hasPrivate) fail('branch form payer dropdown missing or lacks a (פרטי) option: ' + JSON.stringify(formCheck));
-  if (!formCheck.selected.includes('מועצת בדיקת עשן')) fail('branch form payer dropdown not pre-selected with the council: ' + JSON.stringify(formCheck));
-  captureScreen('branch-form-payer.png');
-  ok('branch form renders contact fields and payer dropdown incl. (פרטי) (dist/branch-form-payer.png)');
-  await evalJs('document.querySelector(".modal-backdrop .icon-button, [class*=modal] .icon-button, .modal .icon-button")?.click(); return true;');
-  await sleep(800);
-
-  // Rent page: payer chips incl. the private one marked (פרטי), plus the new wording.
-  await evalJs('document.querySelector(\'[data-page="rent"]\').click(); return true;');
-  let rentPayers = false;
-  for (let i = 0; i < 15 && !rentPayers; i++) {
-    await sleep(1500);
-    rentPayers = await evalJs('return document.body.innerText.includes("מועצת בדיקת עשן") && document.body.innerText.includes("גן פרטי לבדיקת עשן") && document.body.innerText.includes("(פרטי)") && document.body.innerText.includes("לגופים פרטיים")');
-  }
-  if (!rentPayers) fail('rent page does not show payer chips with (פרטי) markers / private wording');
-  captureScreen('rent-payers.png');
-  ok('rent page shows payer chips incl. private (פרטי) and private wording (dist/rent-payers.png)');
-
   // Rent summary cards (v0.2.7): navigate to the rent page in the real window,
   // verify the four cards are rendered as clickable shortcuts, and exercise
   // the zero-data destinations (dummy DB has no rent records) - each card must
@@ -347,4 +278,10 @@ try {
   if (backup) fs.writeFileSync(envFile, backup); else fs.rmSync(envFile, { force: true });
   await mongo.stop();
 }
+// Payer / branch-contacts UI evidence (v0.3.1): same shared harness that
+// verify-installer runs against the published installer, here against the
+// just-built dist exe. Runs after the flow above released port 4000.
+await sleep(3000);
+await captureUiEvidence({ exe, outDir: path.resolve('dist'), cdpPort: 9226, fail, ok });
+console.log('SMOKE_UI_EVIDENCE_PASSED');
 process.exit(0);

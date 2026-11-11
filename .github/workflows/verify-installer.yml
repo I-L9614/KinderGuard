@@ -46,7 +46,15 @@ jobs:
       - name: Run clean-install verification
         run: node tests/manual/verify-installer/verify.mjs
 
+      - name: Capture embedded UI evidence from the installed published app
+        run: node tests/manual/verify-installer/ui-evidence.mjs
+
       - uses: actions/upload-artifact@v4
         with:
           name: client-mode-evidence
           path: client-mode-window.png
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: published-ui-evidence
+          path: published-ui-evidence/*.png
