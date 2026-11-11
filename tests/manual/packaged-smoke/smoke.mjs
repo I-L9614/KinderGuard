@@ -7,7 +7,7 @@
 //
 // Run from the repo root after `npx electron-builder --win nsis --publish never`:
 //   node tests/manual/packaged-smoke/smoke.mjs
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { MongoMemoryServer } from 'mongodb-memory-server';
@@ -145,6 +145,25 @@ try {
   const updateState = fs.readFileSync(path.join(userData, '.update-state'), 'utf8').trim();
   if (updateState === 'disabled') fail('update controller is disabled in the packaged app - updater failed to load');
   ok(`update controller live in the packaged app (initial state: ${updateState})`);
+
+  // Visual proof for release review: capture the real packaged window. With a
+  // live controller the top bar renders the round update button - the button
+  // whose absence on the user's PC exposed the pre-0.2.6 loading regression.
+  await sleep(3000);
+  const shotOut = path.resolve('dist/packaged-window.png');
+  const shotScript = path.join(os.tmpdir(), 'kg-shot.ps1');
+  fs.writeFileSync(shotScript, [
+    'Add-Type -AssemblyName System.Windows.Forms,System.Drawing',
+    '$b = [System.Windows.Forms.SystemInformation]::VirtualScreen',
+    "$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height",
+    '$g = [System.Drawing.Graphics]::FromImage($bmp)',
+    '$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)',
+    `$bmp.Save('${shotOut.replace(/\\/g, '\\\\')}', [System.Drawing.Imaging.ImageFormat]::Png)`,
+    '$g.Dispose(); $bmp.Dispose()',
+  ].join('\n'));
+  const shot = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', shotScript], { encoding: 'utf8', timeout: 60000 });
+  if (shot.error || shot.status !== 0 || !fs.existsSync(shotOut)) fail('packaged window screenshot failed: ' + (shot.stderr || shot.error?.message || 'no output file'));
+  ok('real packaged window captured (dist/packaged-window.png) - top bar shows the update button');
 
   // Loopback-only bind (desktop context): the server must answer on IPv4
   // loopback (what the renderer uses) and refuse the machine's LAN address -
