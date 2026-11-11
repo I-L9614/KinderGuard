@@ -11,7 +11,7 @@ const rentAgreementSchema = new mongoose.Schema({
   authorityId: { type: mongoose.Schema.Types.ObjectId, ref: 'Authority', required: true, index: true },
   // incoming: the authority pays rent for a daycare (the original case).
   // outgoing: the account pays rent to the authority (e.g. office landlords).
-  direction: { type: String, enum: ['incoming', 'outgoing'], default: 'incoming', index: true },
+  direction: { type: String, enum: ['incoming', 'outgoing'], default: 'outgoing', index: true },
   // Amounts may be absent until the user supplies them: null means "not set
   // yet", never zero and never paid. No payments are scheduled while null.
   monthlyAmount: { type: Number, min: 0, default: null },

@@ -642,4 +642,16 @@ describe('Amount-less and outgoing rent records', () => {
   it('keeps property branches out of nothing they do not belong to and rejects a bad kind', async () => {
     await request(app).post('/api/branches').set(auth()).send({ name: 'x', kind: 'castle' }).expect(400);
   });
+
+  it('defaults direction to outgoing - every rental is something we pay', async () => {
+    const branch = await request(app).post('/api/branches').set(auth()).send({ name: 'גן ברירת מחדל' }).expect(201);
+    const landlord = await request(app).post('/api/rent/authorities').set(auth()).send({ name: 'משכיר ברירת מחדל', type: 'private' }).expect(201);
+    const res = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId: branch.body._id, authorityId: landlord.body._id,
+    }).expect(201);
+    expect(res.body.direction).toBe('outgoing');
+    // The agreements list carries the branch kind so the UI can mark offices.
+    const list = await request(app).get('/api/rent/summary').set(auth()).expect(200);
+    expect(list.body.agreements.find((a) => a._id === res.body._id).branchId.kind).toBe('daycare');
+  });
 });

@@ -404,7 +404,7 @@ const renderRent = async () => {
     const series = agreement.chequeSeries?.seriesEndDate ? ` · הסדרה מסתיימת ${date(agreement.chequeSeries.seriesEndDate)}` : '';
     return `<article class="license-row">
       <div class="license-icon ${next ? (next.status === 'Handed' ? 'warning' : '') : ''}">${agreement.paymentMethod === 'cheque' ? '✎' : '⇄'}</div>
-      <div class="license-main"><strong>${esc(agreement.branchId?.name || 'סניף')}${agreement.direction === 'outgoing' ? ' <span class="muted">(שכירות שאנחנו משלמים)</span>' : ''}</strong><small>${agreement.frequency ? `${rentFrequencyText(agreement.frequency)} · ${rentMethodText(agreement.paymentMethod)} · ` : ''}${next ? `פרעון הבא ${date(next.dueDate)} · ${money(next.amount)}` : (agreement.monthlyAmount == null ? 'הסכום והמועדים יוזנו בהמשך' : 'אין מועד קרוב')}${series}</small></div>
+      <div class="license-main"><strong>${esc(agreement.branchId?.name || 'סניף')}${agreement.branchId?.kind === 'property' ? ' <span class="muted">(משרד)</span>' : ''}${agreement.direction === 'incoming' ? ' <span class="muted">(הגוף משלם לנו)</span>' : ''}</strong><small>${agreement.frequency ? `${rentFrequencyText(agreement.frequency)} · ${rentMethodText(agreement.paymentMethod)} · ` : ''}${next ? `פרעון הבא ${date(next.dueDate)} · ${money(next.amount)}` : (agreement.monthlyAmount == null ? 'הסכום והמועדים יוזנו בהמשך' : 'אין מועד קרוב')}${series}</small></div>
       <span class="amount-cell">${agreement.monthlyAmount != null ? `${money(agreement.monthlyAmount)} / חודש` : 'טרם הוזן'}</span>
       <span class="status-pill ${pillClass}">${pillText}</span>
       ${next && agreement.paymentMethod === 'cheque' && next.status === 'Pending' ? `<button class="text-button" data-rent-handed="${next._id}">סמן כנמסר</button>` : ''}
@@ -520,9 +520,9 @@ const rentAgreementForm = () => {
   if (!state.branches.length) return toast('צריך להגדיר סניף לפני הוספת הסכם שכירות', 'warning');
   if (!authorities.length) return toast('צריך להגדיר רשות לפני הוספת הסכם שכירות', 'warning');
   const m = modal('הסכם שכירות חדש', `<form id="rentAgreementForm" class="form-grid">
-    <div class="two-col"><label>מעון / נכס<select name="branchId">${state.branches.map((b) => `<option value="${b._id}">${esc(b.name)}${b.kind === 'property' ? ' (נכס)' : ''}</option>`).join('')}</select></label>
+    <div class="two-col"><label>מעון / משרד<select name="branchId">${state.branches.map((b) => `<option value="${b._id}">${esc(b.name)}${b.kind === 'property' ? ' (משרד)' : ''}</option>`).join('')}</select></label>
     <label>גוף משלם / מקבל<select name="authorityId">${authorities.map((a) => `<option value="${a._id}">${esc(a.name)}</option>`).join('')}</select></label></div>
-    <label>כיוון התשלום<select name="direction"><option value="incoming">הגוף משלם לנו (מעון)</option><option value="outgoing">אנחנו משלמים לגוף (למשל שכירות משרד)</option></select></label>
+    <label>כיוון התשלום<select name="direction"><option value="outgoing">אנחנו משלמים לגוף (שכירות)</option><option value="incoming">הגוף משלם לנו</option></select></label>
     <div class="two-col"><label>סכום חודשי (₪)<input name="monthlyAmount" type="number" min="0" step="0.01" placeholder="יוזן בהמשך"></label>
     <label>סכום שנתי (₪)<input name="annualAmount" type="number" min="0" step="0.01" placeholder="ברירת מחדל: חודשי × 12"><small class="muted">אפשר לשנות - למשל בהסכם לחלק משנה</small></label></div>
     <div class="two-col"><label>תדירות תשלום<select name="frequency"><option value="monthly">חודשי</option><option value="quarterly">רבעוני</option><option value="annual">שנתי</option><option value="custom">מועדים מותאמים</option></select></label>

@@ -190,7 +190,7 @@ const validateAgreementInput = async (req, res) => {
   }
   if (monthly != null && !validDate(firstDueDate)) { res.status(400).json({ message: 'יש להזין תאריך פרעון ראשון תקין' }); return null; }
   if (firstDueDate && !validDate(firstDueDate)) { res.status(400).json({ message: 'יש להזין תאריך פרעון ראשון תקין' }); return null; }
-  const direction = req.body.direction === 'outgoing' ? 'outgoing' : 'incoming';
+  const direction = req.body.direction === 'incoming' ? 'incoming' : 'outgoing';
   const branch = await Branch.findOne({ _id: branchId, adminId });
   if (!branch) { res.status(404).json({ message: 'הסניף לא נמצא' }); return null; }
   if (branch.deleting) { res.status(409).json({ message: 'הסניף בתהליך מחיקה - לא ניתן להוסיף הסכם שכירות' }); return null; }
@@ -369,7 +369,7 @@ export const rentSummary = async (req, res) => {
   const adminId = getAdminId(req.user);
   const [authorities, agreements, payments, groups] = await Promise.all([
     Authority.find({ adminId }).sort({ name: 1 }),
-    RentAgreement.find({ adminId }).sort({ createdAt: -1 }).populate('branchId', 'name').populate('authorityId', 'name'),
+    RentAgreement.find({ adminId }).sort({ createdAt: -1 }).populate('branchId', 'name kind').populate('authorityId', 'name'),
     RentPayment.find({ adminId, status: { $ne: 'Cancelled' } }).sort({ dueDate: 1 }),
     RentPaymentGroup.find({ adminId, status: { $ne: 'Cancelled' } }).sort({ dueDate: 1 }),
   ]);

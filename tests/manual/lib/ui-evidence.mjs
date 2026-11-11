@@ -197,11 +197,11 @@ export async function captureUiEvidence({ exe, outDir, cdpPort, fail, ok }) {
     }
     if (!officeRow) fail('amount-less office agreement does not render with the "טרם הוזן" placeholder');
     const wording = await evalJs(`return {
-      marker: document.body.innerText.includes('(שכירות שאנחנו משלמים)'),
+      marker: document.body.innerText.includes('(משרד)'),
       later: document.body.innerText.includes('הסכום והמועדים יוזנו בהמשך'),
       zero: /₪\\s*0(?!\\d)/.test(document.body.innerText),
     };`);
-    if (!wording.marker || !wording.later) fail('amount-less office agreement missing outgoing marker or later-entry wording: ' + JSON.stringify(wording));
+    if (!wording.marker || !wording.later) fail('amount-less office agreement missing (משרד) marker or later-entry wording: ' + JSON.stringify(wording));
     if (wording.zero) fail('amount-less office agreement renders a ₪0 amount - the exact misreading to avoid');
     captureScreen('rent-amountless-office.png');
     ok('amount-less outgoing office record renders "טרם הוזן" with no ₪0 (rent-amountless-office.png)');
