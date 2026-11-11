@@ -48,7 +48,7 @@
 
 /* KinderGuard mobile polish - approved preview layer */
 @media (max-width:620px){
-  .topbar{position:sticky;padding:10px 14px;min-height:0;gap:8px}
+  .topbar{position:static;padding:10px 14px;min-height:0;gap:8px}
   .brand-mark{width:36px;height:36px;border-radius:12px;font-size:13px}
   .brand h1{font-size:15px}
   #header-actions{display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px}
