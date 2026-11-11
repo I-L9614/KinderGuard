@@ -96,8 +96,9 @@ try {
   // (e.g. an electron-updater load error) instead of a bare marker absence.
   const appLog = path.join(os.tmpdir(), 'kg-smoke-app.log');
   fs.rmSync(appLog, { force: true });
-  const appLogStream = fs.createWriteStream(appLog);
-  child = spawn(exe, [], { stdio: ['ignore', appLogStream, appLogStream] });
+  // A numeric fd works cross-platform; a WriteStream is rejected on Windows.
+  const appLogFd = fs.openSync(appLog, 'w');
+  child = spawn(exe, [], { stdio: ['ignore', appLogFd, appLogFd] });
   let healthy = false;
   let uiServed = false;
   for (let i = 0; i < 60 && !healthy; i++) {
