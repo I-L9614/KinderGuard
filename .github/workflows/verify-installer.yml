@@ -1,0 +1,52 @@
+name: Verify published installer
+
+# Manual gate before a release is handed to customers: downloads the exact
+# published installer, checks it against the update feed, silent-installs it
+# on a pristine Windows runner, and proves the clean-install client mode
+# visually (screenshot artifact).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag to verify (e.g. v0.3.0)
+        required: true
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm ci
+
+      - name: Download the published installer and update feed
+        shell: pwsh
+        run: |
+          $tag = '${{ inputs.version }}'
+          curl.exe -sL "https://github.com/I-L9614/KinderGuard/releases/download/$tag/KinderGuard-Setup-$($tag.TrimStart('v')).exe" -o installer.exe
+          curl.exe -sL "https://github.com/I-L9614/KinderGuard/releases/download/$tag/latest.yml" -o latest.yml
+          if (-not (Test-Path installer.exe)) { throw 'installer download failed' }
+
+      - name: Verify installer sha512 against the update feed
+        shell: pwsh
+        run: |
+          $expected = (Select-String -Path latest.yml -Pattern 'sha512: (.+)$').Matches[0].Groups[1].Value
+          $actual = [Convert]::ToBase64String([System.Security.Cryptography.SHA512]::Create().ComputeHash([IO.File]::ReadAllBytes('installer.exe')))
+          if ($actual -ne $expected) { throw "sha512 mismatch: feed=$expected actual=$actual" }
+          echo "installer matches the published latest.yml sha512"
+
+      - name: Silent-install like a customer
+        shell: pwsh
+        run: Start-Process .\installer.exe -ArgumentList '/S' -Wait
+
+      - name: Run clean-install verification
+        run: node tests/manual/verify-installer/verify.mjs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-mode-evidence
+          path: client-mode-window.png
