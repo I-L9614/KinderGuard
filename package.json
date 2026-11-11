@@ -1,6 +1,6 @@
 {
   "name": "kinderguard",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "KinderGuard desktop app for managing daycare branches and permit renewals.",
   "main": "electron/main.js",
@@ -36,6 +36,7 @@
     "aws-sdk-client-mock": "^4.1.0",
     "electron": "^45.2.3",
     "electron-builder": "^26.18.0",
+    "jsdom": "^31.0.0",
     "mongodb-memory-server": "^11.2.0",
     "nodemon": "^3.0.1",
     "supertest": "^7.2.2",
