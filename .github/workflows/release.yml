@@ -1,0 +1,40 @@
+name: Build Windows installer
+
+# Manual prep route only: run by hand from the Actions tab when a release is
+# approved. It builds the NSIS installer and stores it as a build artifact.
+# It does NOT publish a GitHub Release and needs no tokens beyond the default
+# GITHUB_TOKEN (artifact upload only, no signing, no secrets).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run automated tests
+        run: npm test
+
+      - name: Build the NSIS installer (no publish)
+        run: npx electron-builder --win nsis --publish never
+
+      - name: Upload the installer as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kinderguard-windows-installer
+          path: |
+            dist/*.exe
+            dist/latest.yml
+          retention-days: 14
