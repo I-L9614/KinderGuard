@@ -199,10 +199,10 @@ export async function captureUiEvidence({ exe, outDir, cdpPort, fail, ok }) {
     const wording = await evalJs(`return {
       marker: document.body.innerText.includes('(משרד)'),
       later: document.body.innerText.includes('הסכום והמועדים יוזנו בהמשך'),
-      zero: /₪\\s*0(?!\\d)/.test(document.body.innerText),
+      zero: [...document.querySelectorAll('.license-row')].filter((r) => r.innerText.includes('משרד בדיקת עשן')).some((r) => /₪\\s*0(?!\\d)/.test(r.innerText)),
     };`);
     if (!wording.marker || !wording.later) fail('amount-less office agreement missing (משרד) marker or later-entry wording: ' + JSON.stringify(wording));
-    if (wording.zero) fail('amount-less office agreement renders a ₪0 amount - the exact misreading to avoid');
+    if (wording.zero) fail('amount-less office agreement row renders a ₪0 amount - the exact misreading to avoid');
     captureScreen('rent-amountless-office.png');
     ok('amount-less outgoing office record renders "טרם הוזן" with no ₪0 (rent-amountless-office.png)');
 
