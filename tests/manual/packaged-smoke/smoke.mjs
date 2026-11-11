@@ -228,6 +228,7 @@ try {
   // verify the four cards are rendered as clickable shortcuts, and exercise
   // the zero-data destinations (dummy DB has no rent records) - each card must
   // answer gracefully, never mutate.
+  await evalJs('document.querySelector(\'[data-page="rent"]\').click(); return true;');
   let onRent = false;
   for (let i = 0; i < 15 && !onRent; i++) {
     await sleep(1500);
