@@ -2,6 +2,7 @@ import { app, BrowserWindow, Tray, Menu, nativeImage, dialog, shell } from 'elec
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import { setupIpcHandlers, setupUpdateIpcHandlers } from './ipc.js';
 import { createUpdateController, startUpdateScheduling } from './updater.js';
 
@@ -40,7 +41,14 @@ const setupUpdates = async () => {
   let autoUpdater = null;
   if (app.isPackaged) {
     try {
-      ({ autoUpdater } = await import('electron-updater'));
+      // electron-updater is CommonJS and exposes autoUpdater via a lazy
+      // defineProperty getter that Node's ESM named-export detection misses:
+      // `await import('electron-updater')` yields autoUpdater=undefined, which
+      // silently started the controller 'disabled' in every packaged build
+      // before 0.2.6 (the update button never appeared). CJS require() gets
+      // the real exports object with the working getter.
+      const require = createRequire(import.meta.url);
+      ({ autoUpdater } = require('electron-updater'));
     } catch (error) {
       console.error('electron-updater unavailable:', error?.message || 'Unknown error');
     }
@@ -51,6 +59,9 @@ const setupUpdates = async () => {
     send: (status) => { if (mainWindow) mainWindow.webContents.send('update-status', status); },
     log: (message) => console.log('[updates]', message),
   });
+  // Packaged-smoke marker: proves the updater actually loaded in the real
+  // packaged runtime (a 'disabled' state here means the button is hidden).
+  try { fs.writeFileSync(path.join(configDir, '.update-state'), updateController.getState().status); } catch {}
   setupUpdateIpcHandlers(() => updateController);
   stopUpdateScheduling = startUpdateScheduling(updateController);
 };

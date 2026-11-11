@@ -86,7 +86,7 @@ fs.rmSync(badMarker, { force: true });
 
 const mongo = await MongoMemoryServer.create();
 const backup = envBackup;
-for (const m of ['.bridge-ok', '.bridge-missing', '.preload-error']) fs.rmSync(path.join(userData, m), { force: true });
+for (const m of ['.bridge-ok', '.bridge-missing', '.preload-error', '.update-state']) fs.rmSync(path.join(userData, m), { force: true });
 fs.writeFileSync(envFile, `MONGO_URI=${mongo.getUri()}\nJWT_SECRET=smoke-secret\n`);
 ok('dummy .env written to the real userData folder (no S3 on purpose)');
 
@@ -120,6 +120,14 @@ try {
   if (fs.existsSync(path.join(userData, '.bridge-missing'))) fail('window.electronAPI missing in the packaged renderer');
   if (!fs.existsSync(path.join(userData, '.bridge-ok'))) fail('bridge self-check never reported (did-finish-load?)');
   ok('real Electron preload bridge verified in the packaged renderer (window.electronAPI present)');
+
+  // Updater actually loaded in the packaged runtime: the controller writes
+  // its initial state to .update-state, and 'disabled' in a packaged build
+  // means the update button is hidden (the pre-0.2.6 ESM-import regression).
+  if (!fs.existsSync(path.join(userData, '.update-state'))) fail('update state marker missing (setupUpdates never ran?)');
+  const updateState = fs.readFileSync(path.join(userData, '.update-state'), 'utf8').trim();
+  if (updateState === 'disabled') fail('update controller is disabled in the packaged app - updater failed to load');
+  ok(`update controller live in the packaged app (initial state: ${updateState})`);
 
   // Loopback-only bind (desktop context): the server must answer on IPv4
   // loopback (what the renderer uses) and refuse the machine's LAN address -
