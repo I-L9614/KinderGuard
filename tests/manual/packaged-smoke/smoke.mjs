@@ -189,22 +189,54 @@ try {
   const buttonLabel = await evalJs('return document.querySelector("#update-slot .update-button .update-label")?.textContent || null');
   if (!buttonLabel) fail('update button is NOT rendered in the authenticated packaged window');
   ok(`update button rendered in the packaged window ("${buttonLabel}")`);
+
+  const captureScreen = (name) => {
+    const shotOut = path.resolve('dist', name);
+    const shotScript = path.join(os.tmpdir(), 'kg-shot-' + name + '.ps1');
+    fs.writeFileSync(shotScript, [
+      'Add-Type -AssemblyName System.Windows.Forms,System.Drawing',
+      '$b = [System.Windows.Forms.SystemInformation]::VirtualScreen',
+      "$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height",
+      '$g = [System.Drawing.Graphics]::FromImage($bmp)',
+      '$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)',
+      `$bmp.Save('${shotOut.replace(/\\/g, '\\\\')}', [System.Drawing.Imaging.ImageFormat]::Png)`,
+      '$g.Dispose(); $bmp.Dispose()',
+    ].join('\n'));
+    const shot = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', shotScript], { encoding: 'utf8', timeout: 60000 });
+    if (shot.error || shot.status !== 0 || !fs.existsSync(shotOut)) fail('packaged window screenshot failed: ' + (shot.stderr || shot.error?.message || 'no output file'));
+  };
+  captureScreen('packaged-window.png');
+  ok('real packaged window captured (dist/packaged-window.png) - top bar shows the update button');
+
+  // Rent summary cards (v0.2.7): navigate to the rent page in the real window,
+  // verify the four cards are rendered as clickable shortcuts, and exercise
+  // the zero-data destinations (dummy DB has no rent records) - each card must
+  // answer gracefully, never mutate.
+  await evalJs('document.querySelector(\'[data-page="rent"]\').click(); return true;');
+  let onRent = false;
+  for (let i = 0; i < 15 && !onRent; i++) {
+    await sleep(1500);
+    onRent = await evalJs('return document.body.innerText.includes("שכירות לרשויות")');
+  }
+  if (!onRent) fail('rent page did not load in the packaged window');
+  const cardIds = await evalJs(`return ['rentAnnualCard','rentUpcomingCard','rentChecksCard','rentAlertsCard'].map((id) => { const c = document.getElementById(id); return c && c.classList.contains('clickable') ? id : null; });`);
+  if (cardIds.some((id) => !id)) fail('rent summary cards missing or not clickable: ' + JSON.stringify(cardIds));
+  ok('rent summary cards rendered as clickable shortcuts in the packaged window');
+  captureScreen('rent-cards.png');
+  ok('rent page captured (dist/rent-cards.png) - summary cards and update button in the top bar');
+  await evalJs('document.getElementById("rentUpcomingCard").click(); return true;');
+  await sleep(800);
+  const toast1 = await evalJs('return document.querySelector(".toast-warning")?.textContent || null');
+  if (!toast1 || !toast1.includes('אין תשלומים קרובים')) fail('upcoming-payments card did not answer the empty state: ' + toast1);
+  captureScreen('rent-card-empty-toast.png');
+  ok('upcoming-payments card answers the zero-data state with a toast (captured in dist/rent-card-empty-toast.png)');
+  await evalJs('document.getElementById("rentChecksCard").click(); return true;');
+  await sleep(800);
+  const toast2 = await evalJs('return document.querySelectorAll(".toast-warning").length');
+  if (!toast2) fail('deposited-checks card did not answer the empty state');
+  ok('deposited-checks card answers the zero-data state with a toast (no list, no mutation)');
   ws.close();
   await sleep(1000);
-  const shotOut = path.resolve('dist/packaged-window.png');
-  const shotScript = path.join(os.tmpdir(), 'kg-shot.ps1');
-  fs.writeFileSync(shotScript, [
-    'Add-Type -AssemblyName System.Windows.Forms,System.Drawing',
-    '$b = [System.Windows.Forms.SystemInformation]::VirtualScreen',
-    "$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height",
-    '$g = [System.Drawing.Graphics]::FromImage($bmp)',
-    '$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)',
-    `$bmp.Save('${shotOut.replace(/\\/g, '\\\\')}', [System.Drawing.Imaging.ImageFormat]::Png)`,
-    '$g.Dispose(); $bmp.Dispose()',
-  ].join('\n'));
-  const shot = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', shotScript], { encoding: 'utf8', timeout: 60000 });
-  if (shot.error || shot.status !== 0 || !fs.existsSync(shotOut)) fail('packaged window screenshot failed: ' + (shot.stderr || shot.error?.message || 'no output file'));
-  ok('real packaged window captured (dist/packaged-window.png) - top bar shows the update button');
 
   // Loopback-only bind (desktop context): the server must answer on IPv4
   // loopback (what the renderer uses) and refuse the machine's LAN address -

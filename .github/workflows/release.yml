@@ -40,5 +40,5 @@ jobs:
           path: |
             dist/*.exe
             dist/latest.yml
-            dist/packaged-window.png
+            dist/*.png
           retention-days: 14
