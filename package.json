@@ -1,6 +1,6 @@
 {
   "name": "kinderguard",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "description": "KinderGuard desktop app for managing daycare branches and permit renewals.",
   "main": "electron/main.js",

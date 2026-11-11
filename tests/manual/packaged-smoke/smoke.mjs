@@ -40,11 +40,51 @@ const productName = srcPkg.build?.productName || srcPkg.productName || srcPkg.na
 if (productName !== 'KinderGuard') fail(`unexpected productName: ${productName}`);
 ok(`packaged ${packed}, productName=${productName} version=${srcPkg.version} (userData = %APPDATA%\\KinderGuard)`);
 
-const mongo = await MongoMemoryServer.create();
+// First-launch regression (the v0.2.4 crash): with NO .env anywhere, the
+// packaged app must reach the Hebrew setup dialog instead of dying with an
+// uncaught "Missing required environment variables" in the main process. The
+// dialog path writes a marker file; the old crash never produced one.
 const userData = path.join(process.env.APPDATA, 'KinderGuard');
 fs.mkdirSync(userData, { recursive: true });
 const envFile = path.join(userData, '.env');
-const backup = fs.existsSync(envFile) ? fs.readFileSync(envFile) : null;
+const firstRunMarker = path.join(userData, '.first-run-setup-shown');
+const envBackup = fs.existsSync(envFile) ? fs.readFileSync(envFile) : null;
+fs.rmSync(envFile, { force: true });
+fs.rmSync(firstRunMarker, { force: true });
+const firstRun = spawn(exe, [], { stdio: 'ignore' });
+let markerSeen = false;
+for (let i = 0; i < 15 && !markerSeen; i++) {
+  await sleep(2000);
+  if (firstRun.exitCode !== null) break;
+  markerSeen = fs.existsSync(firstRunMarker);
+}
+firstRun.kill();
+await sleep(1000);
+if (!markerSeen) fail('first launch without .env did not reach the setup dialog (uncaught startup crash?)');
+ok('first launch without .env reaches the Hebrew setup dialog (no uncaught env crash)');
+
+// Bad-config regression: a .env that IS present but points at an unreachable
+// MongoDB must land in the Hebrew startup-error dialog (marker file), not in
+// an uncaught crash. Port 9 (discard) refuses fast, but mongoose still waits
+// out its server-selection timeout, so allow up to 90s.
+const badMarker = path.join(userData, '.startup-error-shown');
+fs.rmSync(badMarker, { force: true });
+fs.writeFileSync(envFile, 'MONGO_URI=mongodb://127.0.0.1:9/kg-smoke\nJWT_SECRET=smoke-secret\n');
+const badRun = spawn(exe, [], { stdio: 'ignore' });
+let badMarkerSeen = false;
+for (let i = 0; i < 45 && !badMarkerSeen; i++) {
+  await sleep(2000);
+  if (badRun.exitCode !== null) break;
+  badMarkerSeen = fs.existsSync(badMarker);
+}
+badRun.kill();
+await sleep(1000);
+if (!badMarkerSeen) fail('bad .env did not reach the Hebrew startup-error dialog');
+ok('present-but-bad .env reaches the Hebrew startup-error dialog (graceful failure)');
+fs.rmSync(badMarker, { force: true });
+
+const mongo = await MongoMemoryServer.create();
+const backup = envBackup;
 fs.writeFileSync(envFile, `MONGO_URI=${mongo.getUri()}\nJWT_SECRET=smoke-secret\n`);
 ok('dummy .env written to the real userData folder (no S3 on purpose)');
 

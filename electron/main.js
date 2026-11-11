@@ -12,7 +12,15 @@ import { createUpdateController, startUpdateScheduling } from './updater.js';
 const configDir = app.getPath('userData');
 process.env.KINDERGUARD_CONFIG_DIR = configDir;
 const hasServerConfig = fs.existsSync(path.join(configDir, '.env')) || fs.existsSync(path.resolve(process.cwd(), '.env'));
-const { startServer, stopServer } = await import('../src/server.js');
+// The server module loads src/config/env.js, which throws when the .env is
+// missing. Importing it here at module top level crashed the main process
+// BEFORE app.whenReady(), so first-launch users got Electron's default
+// English "JavaScript error" dialog instead of the Hebrew missing-config
+// dialog below. The import is deferred into the whenReady flow, after the
+// hasServerConfig gate, where the .catch turns failures into the Hebrew
+// startup-error dialog.
+let startServer = null;
+let stopServer = async () => {};
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -192,6 +200,9 @@ app.whenReady().then(async () => {
   // to open that folder.
   if (!hasServerConfig) {
     fs.mkdirSync(configDir, { recursive: true });
+    // Marker for the packaged first-launch test: proves this dialog was
+    // reached (the v0.2.4 crash happened before it, leaving no marker).
+    fs.writeFileSync(path.join(configDir, '.first-run-setup-shown'), new Date().toISOString());
     const choice = await dialog.showMessageBox({
       type: 'info',
       title: 'נדרש קובץ הגדרות',
@@ -206,6 +217,7 @@ app.whenReady().then(async () => {
     return;
   }
 
+  ({ startServer, stopServer } = await import('../src/server.js'));
   initializeTray();
   await createWindow();
   setAutoLaunch();
@@ -214,6 +226,9 @@ app.whenReady().then(async () => {
 }).catch(async (error) => {
   const safeMessage = String(error?.message || 'Unknown error').replace(/mongodb(?:\+srv)?:\/\/[^\s'"`]+/gi, '[MongoDB URI redacted]');
   console.error('KinderGuard startup failed:', safeMessage);
+  // Marker for the packaged bad-config test: proves failures land in this
+  // Hebrew error dialog rather than an uncaught main-process crash.
+  try { fs.writeFileSync(path.join(configDir, '.startup-error-shown'), new Date().toISOString()); } catch {}
   await dialog.showMessageBox({
     type: 'error',
     title: 'לא ניתן להפעיל את KinderGuard',
