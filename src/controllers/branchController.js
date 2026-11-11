@@ -5,20 +5,53 @@ import User from '../models/User.js';
 import logger from '../utils/logger.js';
 import BranchDeletion from '../models/BranchDeletion.js';
 import RentAgreement from '../models/RentAgreement.js';
+import Authority from '../models/Authority.js';
 import { deleteLicenseDocument } from '../services/licenseCleanup.js';
 import { getAdminId } from '../utils/access.js';
 
 export const getBranches = async (req, res) => {
   const filter = { adminId: getAdminId(req.user) };
   if (req.user.role === 'Manager') filter._id = { $in: req.user.accessibleBranches };
-  const branches = await Branch.find(filter).sort({ name: 1 });
+  const branches = await Branch.find(filter).populate('authorityId', 'name type').sort({ name: 1 });
   res.json(branches);
 };
 
+const toEmailList = (value) => {
+  if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
+  return String(value || '').split(/[;,\n]/).map((v) => v.trim()).filter(Boolean);
+};
+
+const branchFields = async (body, adminId) => {
+  const fields = {};
+  for (const key of ['name', 'address', 'maxChildren', 'status', 'managerName', 'phone']) {
+    if (body[key] !== undefined) fields[key] = body[key];
+  }
+  if (body.emails !== undefined) fields.emails = toEmailList(body.emails);
+  if (body.authorityId !== undefined) {
+    if (!body.authorityId) {
+      fields.authorityId = null;
+    } else {
+      const owned = await Authority.exists({ _id: body.authorityId, adminId });
+      if (!owned) throw Object.assign(new Error('גוף התשלום לא נמצא'), { status: 400 });
+      fields.authorityId = body.authorityId;
+    }
+  }
+  return fields;
+};
+
 export const createBranch = async (req, res) => {
-  const { name, address, maxChildren, status } = req.body;
-  const branch = await Branch.create({ adminId: getAdminId(req.user), name, address, maxChildren, status });
+  const adminId = getAdminId(req.user);
+  const branch = await Branch.create({ adminId, ...await branchFields(req.body, adminId) });
   res.status(201).json(branch);
+};
+
+export const updateBranch = async (req, res) => {
+  const adminId = getAdminId(req.user);
+  const branch = await Branch.findOne({ _id: req.params.id, adminId });
+  if (!branch) return res.status(404).json({ message: 'הסניף לא נמצא' });
+  Object.assign(branch, await branchFields(req.body, adminId));
+  await branch.save();
+  res.json(branch);
 };
 
 export const deleteBranch = async (req, res) => {

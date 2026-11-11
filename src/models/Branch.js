@@ -5,6 +5,12 @@ const branchSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   address: { type: String, trim: true },
   maxChildren: { type: Number, min: 0 },
+  managerName: { type: String, trim: true },
+  phone: { type: String, trim: true },
+  emails: { type: [String], default: [] },
+  // The payer this branch's rent belongs to (council or private landlord).
+  // Optional: set from the branch form or the payers import, used later by rent agreements.
+  authorityId: { type: mongoose.Schema.Types.ObjectId, ref: 'Authority', default: null },
   status: { type: String, enum: ['Active', 'Pending_License', 'Suspended'], default: 'Active' },
   deleting: { type: Boolean, default: false },
 }, { timestamps: true });

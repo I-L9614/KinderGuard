@@ -12,6 +12,7 @@ import licenseTypeRoutes from './routes/licenseTypeRoutes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
 import taskRoutes from './routes/taskRoutes.js';
 import rentRoutes from './routes/rentRoutes.js';
+import importRoutes from './routes/importRoutes.js';
 import { errorHandler, notFound } from './middleware/errorMiddleware.js';
 import { applySecurityMiddleware } from './middleware/securityMiddleware.js';
 import logger from './utils/logger.js';
@@ -61,6 +62,7 @@ app.use('/api/license-types', licenseTypeRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/rent', rentRoutes);
+app.use('/api/import', importRoutes);
 app.use('/api/auth', authRoutes);
 
 if (fs.existsSync(frontendPath)) {

@@ -150,7 +150,8 @@ export const listAuthorities = async (req, res) => {
 export const createAuthority = async (req, res) => {
   const name = String(req.body.name || '').trim();
   if (!name) return res.status(400).json({ message: 'יש להזין שם רשות' });
-  const authority = await Authority.create({ adminId: getAdminId(req.user), name });
+  const type = req.body.type === 'private' ? 'private' : 'council';
+  const authority = await Authority.create({ adminId: getAdminId(req.user), name, type });
   res.status(201).json(authority);
 };
 

@@ -94,3 +94,8 @@
   .toast{left:12px;right:12px;bottom:12px;max-width:none}
 }
 .row-flash{animation:rowFlash 1.2s ease-in-out 3}@keyframes rowFlash{0%,100%{background:transparent}50%{background:#fff3d6}}
+/* Branch contact panel */
+.contact-grid{display:flex;flex-wrap:wrap;gap:14px 32px}
+.contact-grid>div{display:flex;flex-direction:column;gap:2px}
+.contact-grid strong{font-size:14px;font-weight:600}
+.small-text{font-size:12px;margin-top:2px}
