@@ -602,3 +602,44 @@ describe('Rent status reversal (records-only, audited)', () => {
     await request(app).post(`/api/rent/payment-groups/${g.body._id}/handed`).set(auth()).expect(200);
   });
 });
+
+describe('Amount-less and outgoing rent records', () => {
+  it('creates an outgoing office agreement without amounts and schedules nothing', async () => {
+    const office = await request(app).post('/api/branches').set(auth()).send({ name: 'משרד 702', kind: 'property' }).expect(201);
+    expect(office.body.kind).toBe('property');
+    const landlord = await request(app).post('/api/rent/authorities').set(auth()).send({ name: 'פאני צברי', type: 'private' }).expect(201);
+    const res = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId: office.body._id, authorityId: landlord.body._id, direction: 'outgoing',
+    }).expect(201);
+    expect(res.body.direction).toBe('outgoing');
+    expect(res.body.monthlyAmount).toBeNull();
+    expect(res.body.annualAmount).toBeNull();
+    expect(res.body.firstDueDate).toBeNull();
+    // A missing amount is never materialized as zero payments.
+    expect(await RentPayment.countDocuments({ agreementId: res.body._id })).toBe(0);
+    // And the record stays out of the money totals.
+    const summary = await request(app).get('/api/rent/summary').set(auth()).expect(200);
+    expect(summary.body.totals[String(landlord.body._id)]?.monthly || 0).toBe(0);
+  });
+
+  it('completes an amount-less record later and only then materializes the schedule', async () => {
+    const office = await request(app).post('/api/branches').set(auth()).send({ name: 'משרד 711 712', kind: 'property' }).expect(201);
+    const landlord = await request(app).post('/api/rent/authorities').set(auth()).send({ name: 'ל.ר דהן נכסים', type: 'private' }).expect(201);
+    const created = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId: office.body._id, authorityId: landlord.body._id, direction: 'outgoing',
+    }).expect(201);
+    // Setting the amount alone is not enough: the schedule fields are required with it.
+    await request(app).patch(`/api/rent/agreements/${created.body._id}`).set(auth()).send({ monthlyAmount: 9000 }).expect(400);
+    const updated = await request(app).patch(`/api/rent/agreements/${created.body._id}`).set(auth()).send({
+      monthlyAmount: 9000, frequency: 'monthly', paymentMethod: 'transfer', firstDueDate: daysFromNow(12),
+    }).expect(200);
+    expect(updated.body.annualAmount).toBe(108000);
+    const payments = await RentPayment.find({ agreementId: created.body._id });
+    expect(payments.length).toBeGreaterThanOrEqual(3);
+    expect(payments[0].amount).toBe(9000);
+  });
+
+  it('keeps property branches out of nothing they do not belong to and rejects a bad kind', async () => {
+    await request(app).post('/api/branches').set(auth()).send({ name: 'x', kind: 'castle' }).expect(400);
+  });
+});

@@ -26,6 +26,10 @@ const branchFields = async (body, adminId) => {
   for (const key of ['name', 'address', 'maxChildren', 'status', 'managerName', 'phone']) {
     if (body[key] !== undefined) fields[key] = body[key];
   }
+  if (body.kind !== undefined) {
+    if (!['daycare', 'property'].includes(body.kind)) throw Object.assign(new Error('סוג הרשומה אינו תקין'), { status: 400 });
+    fields.kind = body.kind;
+  }
   if (body.emails !== undefined) fields.emails = toEmailList(body.emails);
   if (body.authorityId !== undefined) {
     if (!body.authorityId) {

@@ -28,6 +28,9 @@ const periodAmount = (agreement) => (agreement.frequency === 'quarterly' ? agree
 // {agreementId, dueDate} unique key makes re-runs no-ops for existing rows).
 export const scheduleRentPayments = async (agreement) => {
   if (agreement.status !== 'Active') return 0;
+  // No amount or no schedule yet: the agreement is a record only, so nothing
+  // is materialized (a missing amount is never scheduled as zero).
+  if (agreement.monthlyAmount == null || !agreement.firstDueDate) return 0;
   const horizon = addMonths(dayStart(), SCHEDULE_HORIZON_MONTHS);
   const dates = [];
   if (agreement.frequency === 'custom') {
@@ -169,13 +172,25 @@ export const deleteAuthority = async (req, res) => {
 const validateAgreementInput = async (req, res) => {
   const adminId = getAdminId(req.user);
   const { branchId, authorityId, monthlyAmount, annualAmount, frequency, firstDueDate, paymentMethod } = req.body;
-  const monthly = Number(monthlyAmount);
-  if (!(monthly > 0)) { res.status(400).json({ message: 'יש להזין סכום חודשי חיובי' }); return null; }
-  const annual = annualAmount === undefined || annualAmount === null || annualAmount === '' ? monthly * 12 : Number(annualAmount);
-  if (!(annual >= 0)) { res.status(400).json({ message: 'הסכום השנתי אינו תקין' }); return null; }
-  if (!['monthly', 'quarterly', 'annual', 'custom'].includes(frequency)) { res.status(400).json({ message: 'תדירות התשלום אינה תקינה' }); return null; }
-  if (!['cheque', 'transfer'].includes(paymentMethod)) { res.status(400).json({ message: 'אמצעי התשלום אינו תקין' }); return null; }
-  if (!validDate(firstDueDate)) { res.status(400).json({ message: 'יש להזין תאריך פרעון ראשון תקין' }); return null; }
+  // Amounts are optional: the user adds them later. A missing amount is
+  // stored as null (never zero) and no payment schedule is materialized.
+  const hasMonthly = monthlyAmount !== undefined && monthlyAmount !== null && monthlyAmount !== '';
+  const monthly = hasMonthly ? Number(monthlyAmount) : null;
+  if (hasMonthly && !(monthly > 0)) { res.status(400).json({ message: 'יש להזין סכום חודשי חיובי' }); return null; }
+  const hasAnnual = annualAmount !== undefined && annualAmount !== null && annualAmount !== '';
+  const annual = hasAnnual ? Number(annualAmount) : (monthly != null ? monthly * 12 : null);
+  if (hasAnnual && !(annual >= 0)) { res.status(400).json({ message: 'הסכום השנתי אינו תקין' }); return null; }
+  // Schedule fields are required once an amount exists; without an amount
+  // they stay unset so nothing invented is displayed or scheduled.
+  if (monthly != null || frequency) {
+    if (!['monthly', 'quarterly', 'annual', 'custom'].includes(frequency)) { res.status(400).json({ message: 'תדירות התשלום אינה תקינה' }); return null; }
+  }
+  if (monthly != null || paymentMethod) {
+    if (!['cheque', 'transfer'].includes(paymentMethod)) { res.status(400).json({ message: 'אמצעי התשלום אינו תקין' }); return null; }
+  }
+  if (monthly != null && !validDate(firstDueDate)) { res.status(400).json({ message: 'יש להזין תאריך פרעון ראשון תקין' }); return null; }
+  if (firstDueDate && !validDate(firstDueDate)) { res.status(400).json({ message: 'יש להזין תאריך פרעון ראשון תקין' }); return null; }
+  const direction = req.body.direction === 'outgoing' ? 'outgoing' : 'incoming';
   const branch = await Branch.findOne({ _id: branchId, adminId });
   if (!branch) { res.status(404).json({ message: 'הסניף לא נמצא' }); return null; }
   if (branch.deleting) { res.status(409).json({ message: 'הסניף בתהליך מחיקה - לא ניתן להוסיף הסכם שכירות' }); return null; }
@@ -183,6 +198,7 @@ const validateAgreementInput = async (req, res) => {
   if (!authority) { res.status(404).json({ message: 'הרשות לא נמצאה' }); return null; }
   let customDueDates = [];
   if (frequency === 'custom') {
+    if (monthly == null) { res.status(400).json({ message: 'בתדירות מותאמת יש להזין סכום חודשי' }); return null; }
     customDueDates = (Array.isArray(req.body.customDueDates) ? req.body.customDueDates : []).filter(validDate).map((d) => dayStart(d));
     if (!customDueDates.length) { res.status(400).json({ message: 'בתדירות מותאמת יש להזין לפחות מועד פרעון אחד' }); return null; }
   }
@@ -197,7 +213,7 @@ const validateAgreementInput = async (req, res) => {
       seriesEndDate: dayStart(series.seriesEndDate),
     };
   }
-  return { adminId, branch, authority, monthly, annual, frequency, customDueDates, paymentMethod, firstDueDate: dayStart(firstDueDate), chequeSeries };
+  return { adminId, branch, authority, monthly, annual, frequency: frequency || null, customDueDates, paymentMethod: paymentMethod || null, firstDueDate: validDate(firstDueDate) ? dayStart(firstDueDate) : null, chequeSeries, direction };
 };
 
 export const createAgreement = async (req, res) => {
@@ -207,6 +223,7 @@ export const createAgreement = async (req, res) => {
     adminId: input.adminId,
     branchId: input.branch._id,
     authorityId: input.authority._id,
+    direction: input.direction,
     monthlyAmount: input.monthly,
     annualAmount: input.annual,
     frequency: input.frequency,
@@ -227,10 +244,32 @@ export const updateAgreement = async (req, res) => {
   const body = { ...req.body };
   // Keep the stored annual figure independent: it only re-derives from the
   // monthly amount when explicitly sent empty, never silently.
+  if (body.direction !== undefined) {
+    if (!['incoming', 'outgoing'].includes(body.direction)) return res.status(400).json({ message: 'כיוון התשלום אינו תקין' });
+    agreement.direction = body.direction;
+  }
   if (body.monthlyAmount !== undefined) {
     const monthly = Number(body.monthlyAmount);
     if (!(monthly > 0)) return res.status(400).json({ message: 'יש להזין סכום חודשי חיובי' });
     agreement.monthlyAmount = monthly;
+    if (body.annualAmount === undefined && agreement.annualAmount == null) agreement.annualAmount = monthly * 12;
+  }
+  // Schedule fields become editable here so an amount-less record can be
+  // completed later; once an amount exists all three must be present.
+  if (body.frequency !== undefined) {
+    if (!['monthly', 'quarterly', 'annual', 'custom'].includes(body.frequency)) return res.status(400).json({ message: 'תדירות התשלום אינה תקינה' });
+    agreement.frequency = body.frequency;
+  }
+  if (body.paymentMethod !== undefined) {
+    if (!['cheque', 'transfer'].includes(body.paymentMethod)) return res.status(400).json({ message: 'אמצעי התשלום אינו תקין' });
+    agreement.paymentMethod = body.paymentMethod;
+  }
+  if (body.firstDueDate !== undefined) {
+    if (!validDate(body.firstDueDate)) return res.status(400).json({ message: 'יש להזין תאריך פרעון ראשון תקין' });
+    agreement.firstDueDate = dayStart(body.firstDueDate);
+  }
+  if (agreement.monthlyAmount != null && (!agreement.frequency || !agreement.paymentMethod || !agreement.firstDueDate)) {
+    return res.status(400).json({ message: 'עם סכום חודשי יש להזין גם תדירות, אמצעי תשלום ותאריך פרעון ראשון' });
   }
   if (body.annualAmount !== undefined && body.annualAmount !== '') {
     const annual = Number(body.annualAmount);
@@ -339,8 +378,8 @@ export const rentSummary = async (req, res) => {
   for (const agreement of active) {
     const key = String(agreement.authorityId?._id || agreement.authorityId);
     totals[key] = totals[key] || { monthly: 0, annual: 0 };
-    totals[key].monthly += agreement.monthlyAmount;
-    totals[key].annual += agreement.annualAmount;
+    totals[key].monthly += agreement.monthlyAmount || 0;
+    totals[key].annual += agreement.annualAmount || 0;
   }
   res.json({ authorities, agreements, payments, groups, totals });
 };

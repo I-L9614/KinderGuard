@@ -4,6 +4,10 @@ const branchSchema = new mongoose.Schema({
   adminId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   name: { type: String, required: true, trim: true },
   address: { type: String, trim: true },
+  // daycare (default): a daycare branch with permits. property: a rented
+  // asset such as an office - appears only in the rent module, never in the
+  // permits branch list.
+  kind: { type: String, enum: ['daycare', 'property'], default: 'daycare', index: true },
   maxChildren: { type: Number, min: 0 },
   managerName: { type: String, trim: true },
   phone: { type: String, trim: true },
