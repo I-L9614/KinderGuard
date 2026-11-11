@@ -10,6 +10,13 @@ import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const PORT = process.env.PORT || 4000;
+// Bind host. Desktop runs (electron/main.js sets KINDERGUARD_CONFIG_DIR) are
+// single-machine: the embedded server must listen on loopback only, so the
+// Windows firewall has no inbound listener to prompt about and the LAN cannot
+// reach the API. Standalone/web deployments keep the previous all-interfaces
+// behavior, and an explicit HOST always wins.
+export const resolveBindHost = (env = process.env) => env.HOST || (env.KINDERGUARD_CONFIG_DIR ? '127.0.0.1' : undefined);
+const HOST = resolveBindHost();
 let serverInstance;
 let cleanupInterval;
 let maintenanceInterval;
@@ -21,8 +28,15 @@ export const startServer = async () => {
 
   await connectDB();
 
-  serverInstance = app.listen(PORT, () => {
-    console.log(`KinderGuard server listening on http://localhost:${PORT}`);
+  // Reject on listen errors (e.g. EADDRINUSE when the port is already taken)
+  // instead of letting an unhandled 'error' event crash the main process;
+  // the Electron startup flow turns this into the Hebrew startup-error dialog.
+  serverInstance = await new Promise((resolve, reject) => {
+    const s = app.listen(PORT, HOST, () => {
+      console.log(`KinderGuard server listening on http://${HOST || 'localhost'}:${PORT}`);
+      resolve(s);
+    });
+    s.once('error', reject);
   });
 
   cleanupInterval = setInterval(() => cleanupExpiredRefreshTokens(), 24 * 60 * 60 * 1000);

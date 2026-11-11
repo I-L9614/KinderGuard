@@ -11,6 +11,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { MongoMemoryServer } from 'mongodb-memory-server';
+import os from 'os';
 
 const fail = (msg) => { console.error('SMOKE FAIL: ' + msg); process.exit(1); };
 const ok = (msg) => console.log('smoke ok: ' + msg);
@@ -85,6 +86,7 @@ fs.rmSync(badMarker, { force: true });
 
 const mongo = await MongoMemoryServer.create();
 const backup = envBackup;
+for (const m of ['.bridge-ok', '.bridge-missing', '.preload-error']) fs.rmSync(path.join(userData, m), { force: true });
 fs.writeFileSync(envFile, `MONGO_URI=${mongo.getUri()}\nJWT_SECRET=smoke-secret\n`);
 ok('dummy .env written to the real userData folder (no S3 on purpose)');
 
@@ -109,6 +111,32 @@ try {
   uiServed = res.ok && html.includes('KinderGuard');
   if (!uiServed) fail('packaged app is not serving the UI at /');
   ok('packaged app serves the UI');
+
+  // Real Electron preload bridge (the v0.2.4 installed-app regression: an ESM
+  // preload silently never loaded, so window.electronAPI was missing and the
+  // notification self-test button refused to run). main.js writes a marker
+  // after probing the real renderer window.
+  if (fs.existsSync(path.join(userData, '.preload-error'))) fail('preload script failed to load: ' + fs.readFileSync(path.join(userData, '.preload-error'), 'utf8'));
+  if (fs.existsSync(path.join(userData, '.bridge-missing'))) fail('window.electronAPI missing in the packaged renderer');
+  if (!fs.existsSync(path.join(userData, '.bridge-ok'))) fail('bridge self-check never reported (did-finish-load?)');
+  ok('real Electron preload bridge verified in the packaged renderer (window.electronAPI present)');
+
+  // Loopback-only bind (desktop context): the server must answer on IPv4
+  // loopback (what the renderer uses) and refuse the machine's LAN address -
+  // no inbound listener for the Windows firewall to prompt about.
+  try {
+    const v4 = await fetch('http://127.0.0.1:4000/health', { signal: AbortSignal.timeout(5000) });
+    if (!v4.ok) fail('server answered 127.0.0.1 with a non-OK status');
+  } catch { fail('server is not reachable on 127.0.0.1'); }
+  const lan = (() => { for (const list of Object.values(os.networkInterfaces())) { for (const item of list || []) { if (item.family === 'IPv4' && !item.internal) return item.address; } } return null; })();
+  if (lan) {
+    let lanAnswered = false;
+    try { await fetch(`http://${lan}:4000/health`, { signal: AbortSignal.timeout(5000) }); lanAnswered = true; } catch {}
+    if (lanAnswered) fail(`server is reachable on the LAN address ${lan} - expected loopback-only in desktop context`);
+    ok('server bound to loopback only (LAN address refused, no inbound-firewall listener)');
+  } else {
+    ok('server answers on 127.0.0.1 (no LAN interface found to test refusal)');
+  }
 
   console.log('SMOKE_PASSED');
 } finally {

@@ -1,4 +1,8 @@
-import { contextBridge, ipcRenderer } from 'electron';
+// IMPORTANT: this file must stay CommonJS (.cjs). The project is ESM
+// ("type": "module"), and sandboxed Electron preloads only load as CJS - an
+// ESM preload fails silently in the renderer and window.electronAPI never
+// appears (the v0.2.4 installed-app regression this fixes).
+const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   checkLicensesNow: () => ipcRenderer.invoke('check-licenses-now'),

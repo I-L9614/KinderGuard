@@ -142,12 +142,32 @@ const createWindow = async () => {
       nodeIntegration: false,
       contextIsolation: true,
       autoplayPolicy: 'no-user-gesture-required',
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
     },
   });
 
   mainWindow.setMenuBarVisibility(false);
-  mainWindow.loadURL('http://localhost:4000');
+
+  // Bridge diagnostics: if the preload fails to load (e.g. it stops being
+  // CJS) window.electronAPI never appears and in-app features die quietly.
+  // Record both outcomes in userData so tests and support can tell.
+  mainWindow.webContents.on('preload-error', (_event, _path, error) => {
+    console.error('Preload failed to load:', error?.message || error);
+    try { fs.writeFileSync(path.join(configDir, '.preload-error'), String(error?.message || error)); } catch {}
+  });
+  mainWindow.webContents.on('did-finish-load', async () => {
+    try {
+      const bridgeOk = await mainWindow.webContents.executeJavaScript('Boolean(window.electronAPI && window.electronAPI.notify)');
+      fs.writeFileSync(path.join(configDir, bridgeOk ? '.bridge-ok' : '.bridge-missing'), new Date().toISOString());
+      if (!bridgeOk) console.error('window.electronAPI missing in the renderer - check the preload script');
+    } catch (error) {
+      console.error('bridge self-check failed:', error?.message || error);
+    }
+  });
+
+  // 127.0.0.1, not 'localhost': the server binds IPv4 loopback only, and on
+  // some Windows machines localhost resolves to ::1 first.
+  mainWindow.loadURL('http://127.0.0.1:4000');
 
   mainWindow.once('ready-to-show', () => {
     if (!process.argv.includes('--hidden')) {
@@ -229,11 +249,14 @@ app.whenReady().then(async () => {
   // Marker for the packaged bad-config test: proves failures land in this
   // Hebrew error dialog rather than an uncaught main-process crash.
   try { fs.writeFileSync(path.join(configDir, '.startup-error-shown'), new Date().toISOString()); } catch {}
+  const portInUse = error?.code === 'EADDRINUSE';
   await dialog.showMessageBox({
     type: 'error',
     title: 'לא ניתן להפעיל את KinderGuard',
-    message: 'האפליקציה לא הצליחה להתחבר לשירותים הנדרשים.',
-    detail: 'בדקו את חיבור האינטרנט ואת הגדרות השרת, ואז נסו לפתוח מחדש. אם הבעיה נמשכת, פנו למנהל המערכת.',
+    message: portInUse ? 'לא ניתן להפעיל: פורט 4000 תפוס.' : 'האפליקציה לא הצליחה להתחבר לשירותים הנדרשים.',
+    detail: portInUse
+      ? 'כנראה שעותק נוסף של התוכנה או תוכנית אחרת משתמשים בפורט. סגרו עותקים פתוחים של KinderGuard (כולל מהמגש ליד השעון) ונסו שוב. אם הבעיה נמשכת, פנו למנהל המערכת.'
+      : 'בדקו את חיבור האינטרנט ואת הגדרות השרת, ואז נסו לפתוח מחדש. אם הבעיה נמשכת, פנו למנהל המערכת.',
     buttons: ['סגירה'],
   });
   app.quit();
