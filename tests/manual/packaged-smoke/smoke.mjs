@@ -98,7 +98,7 @@ try {
   fs.rmSync(appLog, { force: true });
   // A numeric fd works cross-platform; a WriteStream is rejected on Windows.
   const appLogFd = fs.openSync(appLog, 'w');
-  child = spawn(exe, [], { stdio: ['ignore', appLogFd, appLogFd] });
+  child = spawn(exe, ['--remote-debugging-port=9223'], { stdio: ['ignore', appLogFd, appLogFd] });
   let healthy = false;
   let uiServed = false;
   for (let i = 0; i < 60 && !healthy; i++) {
@@ -146,10 +146,51 @@ try {
   if (updateState === 'disabled') fail('update controller is disabled in the packaged app - updater failed to load');
   ok(`update controller live in the packaged app (initial state: ${updateState})`);
 
-  // Visual proof for release review: capture the real packaged window. With a
-  // live controller the top bar renders the round update button - the button
-  // whose absence on the user's PC exposed the pre-0.2.6 loading regression.
-  await sleep(3000);
+  // Visual proof for release review: capture the real packaged window of an
+  // AUTHENTICATED session (dummy admin in the in-memory DB, discarded with
+  // it). With a live controller the top bar renders the round update button -
+  // the button whose absence on the user's PC exposed the pre-0.2.6 loading
+  // regression.
+  let page;
+  for (let i = 0; i < 15 && !page; i++) {
+    try {
+      const targets = await fetch('http://127.0.0.1:9223/json', { signal: AbortSignal.timeout(3000) }).then((r) => r.json());
+      page = targets.find((t) => t.type === 'page' && t.url.includes('127.0.0.1:4000'));
+    } catch {}
+    if (!page) await sleep(2000);
+  }
+  if (!page) fail('cannot reach the packaged window over CDP');
+  const { default: WebSocket } = await import('ws');
+  const ws = new WebSocket(page.webSocketDebuggerUrl, { perMessageDeflate: false });
+  await new Promise((res, rej) => { ws.on('open', res); ws.on('error', rej); });
+  let cdpId = 0;
+  const cdpPending = new Map();
+  ws.on('message', (data) => { const m = JSON.parse(data.toString()); if (m.id && cdpPending.has(m.id)) { cdpPending.get(m.id)(m); cdpPending.delete(m.id); } });
+  const cdpSend = (method, params = {}) => new Promise((res) => { const i = ++cdpId; cdpPending.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
+  const evalJs = async (body) => {
+    const r = await cdpSend('Runtime.evaluate', { expression: `(async()=>{${body}})()`, awaitPromise: true, returnByValue: true });
+    if (r.result?.exceptionDetails) fail('in-window step failed: ' + JSON.stringify(r.result.exceptionDetails).slice(0, 300));
+    return r.result?.result?.value;
+  };
+  await evalJs(`
+    document.querySelector('[data-tab="register"]').click();
+    document.querySelector('input[name="name"]').value = 'בדיקת עשן';
+    document.querySelector('input[name="email"]').value = 'smoke-admin@test.local';
+    document.querySelector('input[name="password"]').value = 'smoke-pass-123';
+    document.querySelector('#authForm button[type="submit"]').click();
+    return true;`);
+  let loggedIn = false;
+  for (let i = 0; i < 20 && !loggedIn; i++) {
+    await sleep(1500);
+    loggedIn = await evalJs('return !!document.getElementById("logout")');
+  }
+  if (!loggedIn) fail('dummy admin could not log in through the packaged UI');
+  ok('authenticated into the packaged app with a dummy admin (in-memory DB)');
+  const buttonLabel = await evalJs('return document.querySelector("#update-slot .update-button .update-label")?.textContent || null');
+  if (!buttonLabel) fail('update button is NOT rendered in the authenticated packaged window');
+  ok(`update button rendered in the packaged window ("${buttonLabel}")`);
+  ws.close();
+  await sleep(1000);
   const shotOut = path.resolve('dist/packaged-window.png');
   const shotScript = path.join(os.tmpdir(), 'kg-shot.ps1');
   fs.writeFileSync(shotScript, [
