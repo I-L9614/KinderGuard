@@ -92,7 +92,12 @@ ok('dummy .env written to the real userData folder (no S3 on purpose)');
 
 let child;
 try {
-  child = spawn(exe, [], { stdio: 'ignore' });
+  // Capture the app's own console so a smoke failure can show the cause
+  // (e.g. an electron-updater load error) instead of a bare marker absence.
+  const appLog = path.join(os.tmpdir(), 'kg-smoke-app.log');
+  fs.rmSync(appLog, { force: true });
+  const appLogStream = fs.createWriteStream(appLog);
+  child = spawn(exe, [], { stdio: ['ignore', appLogStream, appLogStream] });
   let healthy = false;
   let uiServed = false;
   for (let i = 0; i < 60 && !healthy; i++) {
@@ -116,9 +121,20 @@ try {
   // preload silently never loaded, so window.electronAPI was missing and the
   // notification self-test button refused to run). main.js writes a marker
   // after probing the real renderer window.
-  if (fs.existsSync(path.join(userData, '.preload-error'))) fail('preload script failed to load: ' + fs.readFileSync(path.join(userData, '.preload-error'), 'utf8'));
-  if (fs.existsSync(path.join(userData, '.bridge-missing'))) fail('window.electronAPI missing in the packaged renderer');
-  if (!fs.existsSync(path.join(userData, '.bridge-ok'))) fail('bridge self-check never reported (did-finish-load?)');
+  // The window load (and therefore the bridge marker) can legitimately lag
+  // the HTTP probes while the main process does startup work, so poll for the
+  // marker instead of checking once.
+  let bridgeSeen = false;
+  for (let i = 0; i < 30 && !bridgeSeen; i++) {
+    if (fs.existsSync(path.join(userData, '.preload-error'))) fail('preload script failed to load: ' + fs.readFileSync(path.join(userData, '.preload-error'), 'utf8'));
+    if (fs.existsSync(path.join(userData, '.bridge-missing'))) fail('window.electronAPI missing in the packaged renderer');
+    bridgeSeen = fs.existsSync(path.join(userData, '.bridge-ok'));
+    if (!bridgeSeen) await sleep(2000);
+  }
+  if (!bridgeSeen) {
+    const appLogTail = fs.existsSync(appLog) ? fs.readFileSync(appLog, 'utf8').split('\n').filter((l) => /electron-updater|[Pp]reload|bridge/i.test(l)).slice(-10).join('\n') : '(no app log)';
+    fail('bridge self-check never reported within 60s. App log hints:\n' + appLogTail);
+  }
   ok('real Electron preload bridge verified in the packaged renderer (window.electronAPI present)');
 
   // Updater actually loaded in the packaged runtime: the controller writes
