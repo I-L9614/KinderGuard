@@ -2,7 +2,8 @@ import { app, BrowserWindow, Tray, Menu, nativeImage, dialog } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { startServer, stopServer } from '../src/server.js';
-import { setupIpcHandlers } from './ipc.js';
+import { setupIpcHandlers, setupUpdateIpcHandlers } from './ipc.js';
+import { createUpdateController, startUpdateScheduling } from './updater.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,6 +12,31 @@ const isWindows = process.platform === 'win32';
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
+let updateController = null;
+let stopUpdateScheduling = () => {};
+
+// The update button flow: checks GitHub Releases in the background, shows a
+// yellow dot when a newer version exists, and only after the user clicks and
+// approves does it download and install. quitAndInstall closes the app itself.
+// In unpackaged runs (npm run electron / tests) updates stay disabled.
+const setupUpdates = async () => {
+  let autoUpdater = null;
+  if (app.isPackaged) {
+    try {
+      ({ autoUpdater } = await import('electron-updater'));
+    } catch (error) {
+      console.error('electron-updater unavailable:', error?.message || 'Unknown error');
+    }
+  }
+  updateController = createUpdateController({
+    autoUpdater,
+    isPackaged: app.isPackaged,
+    send: (status) => { if (mainWindow) mainWindow.webContents.send('update-status', status); },
+    log: (message) => console.log('[updates]', message),
+  });
+  setupUpdateIpcHandlers(() => updateController);
+  stopUpdateScheduling = startUpdateScheduling(updateController);
+};
 
 const createTrayIcon = () => {
   const size = 256;
@@ -154,6 +180,7 @@ app.whenReady().then(async () => {
   await createWindow();
   setAutoLaunch();
   scheduleBackgroundChecks();
+  await setupUpdates();
 }).catch(async (error) => {
   const safeMessage = String(error?.message || 'Unknown error').replace(/mongodb(?:\+srv)?:\/\/[^\s'"`]+/gi, '[MongoDB URI redacted]');
   console.error('KinderGuard startup failed:', safeMessage);
@@ -180,5 +207,6 @@ app.on('before-quit', () => {
 });
 
 app.on('will-quit', async () => {
+  stopUpdateScheduling();
   await stopServer();
 });

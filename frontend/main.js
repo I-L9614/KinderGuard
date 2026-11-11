@@ -1,10 +1,27 @@
+import { createUpdateGuard } from './updateGuard.js';
+
 const app = document.getElementById('app');
 const headerActions = document.getElementById('header-actions');
+// Tracks unsaved form input and in-flight uploads so the self-closing update
+// install can demand an explicit save/discard decision first.
+const updateGuard = createUpdateGuard();
+window.__updateGuard = updateGuard;
 const state = { user: null, branches: [], licenses: [], types: [], alerts: [], tasks: [], taskFilter: 'all', taskScope: 'mine', page: 'branches', branchId: null, token: null, cardFilter: null, rent: null, rentAuthorityFilter: null };
 const esc = (value = '') => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const date = (value) => value ? new Date(value).toLocaleDateString('he-IL') : '—';
 const api = async (url, options = {}) => {
   const headers = { ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}), ...options.headers };
+  const method = (options.method || 'GET').toUpperCase();
+  const isMutating = !['GET', 'HEAD'].includes(method);
+  const isUpload = options.body instanceof FormData;
+  if (isMutating) updateGuard.mutationStarted({ upload: isUpload });
+  try {
+    return await apiRequest(url, options, headers);
+  } finally {
+    if (isMutating) updateGuard.mutationFinished({ upload: isUpload });
+  }
+};
+const apiRequest = async (url, options, headers) => {
   let response;
   try { response = await fetch(url, { credentials: 'include', ...options, headers }); }
   catch { const error = new Error('לא ניתן להתחבר לשרת. בדקו שהאפליקציה פועלת ושיש חיבור לרשת.'); error.status = 0; throw error; }
@@ -200,7 +217,9 @@ const renderBranch = async () => {
 
 const modal = (title, content, onClose) => {
   const wrap = document.createElement('div'); wrap.className = 'modal-backdrop'; wrap.innerHTML = `<section class="modal panel"><div class="section-heading"><h3>${title}</h3><button class="icon-button" data-close>×</button></div>${content}</section>`; document.body.append(wrap);
-  const close = () => { wrap.remove(); onClose?.(); }; wrap.querySelector('[data-close]').onclick = close; wrap.onclick = (e) => { if (e.target === wrap) close(); }; return { wrap, close };
+  let wasDirty = false;
+  wrap.addEventListener('input', () => { if (!wasDirty) { wasDirty = true; updateGuard.formBecameDirty(); } });
+  const close = () => { wrap.remove(); updateGuard.formClosed(wasDirty); onClose?.(); }; wrap.querySelector('[data-close]').onclick = close; wrap.onclick = (e) => { if (e.target === wrap) close(); }; return { wrap, close };
 };
 // Branch deletion cascades ONLY after an explicit confirmation that names what
 // will be lost: the branch, its permits (including history), attached documents
@@ -554,6 +573,104 @@ const createUserForm = () => {
   m.wrap.querySelectorAll('input[name="role"]').forEach((radio) => radio.onchange = () => { branchAccess.hidden = m.wrap.querySelector('input[name="role"]:checked').value === 'Admin'; });
   m.wrap.querySelector('form').onsubmit = async (e) => { e.preventDefault(); const f = new FormData(e.currentTarget); const role = f.get('role'); try { await api('/api/users', { method: 'POST', body: JSON.stringify({ name: f.get('name'), email: f.get('email'), password: f.get('password'), role, accessibleBranches: role === 'Admin' ? [] : f.getAll('branches') }) }); m.close(); toast(role === 'Admin' ? 'המנהל השותף נוסף' : 'המשתמש נוסף', 'success'); await loadApp(); state.page = 'settings'; render(); } catch (error) { toast(error.message, 'danger'); } };
 };
+
+// ----- In-app updates -----
+// A small update button in the top bar. When the desktop app finds a newer
+// version it shows a yellow dot; the user clicks, approves, and the app
+// downloads and installs by itself - including closing itself when needed.
+const updateSlot = document.getElementById('update-slot');
+const updateUi = { state: null, manualCheck: false, installPromptOpen: false };
+
+const renderUpdateButton = () => {
+  if (!updateSlot) return;
+  if (!window.electronAPI?.getUpdateState || !updateUi.state || updateUi.state.status === 'disabled') { if (updateSlot) updateSlot.innerHTML = ''; return; }
+  const s = updateUi.state;
+  const hasUpdate = s.status === 'available' || s.status === 'downloaded';
+  const busy = s.status === 'checking' || s.status === 'downloading';
+  const label = { idle: 'עדכון', checking: 'בודק…', uptodate: 'עדכון', available: 'עדכון זמין', downloading: `מוריד ${s.percent ?? 0}%`, downloaded: 'התקנת עדכון', error: 'ניסיון חוזר' }[s.status] || 'עדכון';
+  updateSlot.innerHTML = `<button class="update-button${hasUpdate ? ' has-update' : ''}" id="updateButton" ${busy ? 'disabled' : ''} title="בדיקת עדכונים לאפליקציה"><span class="update-icon">↻</span><span class="update-label">${label}</span>${hasUpdate ? '<span class="update-dot" aria-label="יש עדכון חדש"></span>' : ''}</button>`;
+  updateSlot.querySelector('#updateButton').onclick = onUpdateButtonClick;
+};
+
+const promptDownloadUpdate = () => {
+  const version = updateUi.state?.version ? ` (גרסה ${esc(updateUi.state.version)})` : '';
+  const m = modal('עדכון זמין', `<div class="form-grid"><p>נמצאה גרסה חדשה של KinderGuard${version}.</p><p class="muted">לאחר האישור ההורדה מתבצעת ברקע ואפשר להמשיך לעבוד כרגיל. רק בסיום ההורדה תתבקשו לאשר את ההתקנה עצמה.</p><div class="button-row"><button class="primary" id="approveDownload">הורדת העדכון</button><button class="secondary" data-cancel>מאוחר יותר</button></div></div>`);
+  m.wrap.querySelector('[data-cancel]').onclick = m.close;
+  m.wrap.querySelector('#approveDownload').onclick = async () => { m.close(); try { await window.electronAPI.downloadUpdate(); } catch { toast('הורדת העדכון נכשלה. נסו שוב מאוחר יותר.', 'danger'); } };
+};
+
+const promptInstallUpdate = () => {
+  if (updateUi.installPromptOpen) return;
+  updateUi.installPromptOpen = true;
+  const version = updateUi.state?.version ? ` (גרסה ${esc(updateUi.state.version)})` : '';
+  const m = modal('העדכון מוכן להתקנה', `<div class="form-grid"><p>העדכון${version} ירד בהצלחה.</p><p class="muted">בלחיצה על \"עדכון עכשיו\" האפליקציה תיסגר לבד, תתקין את הגרסה החדשה ותיפתח מחדש - אין צורך לסגור דבר ידנית. הנתונים השמורים, ההגדרות והמסמכים שהועלו נשמרים, אבל טופס פתוח שלא נשמר יאבד כמו בכל סגירה של האפליקציה - כדאי לשמור לפני ההתקנה. \"מאוחר יותר\" משאיר את הכול כמות שהוא, וכפתור העדכון ימשיך להציע את ההתקנה.</p><div class="button-row"><button class="primary" id="approveInstall">עדכון עכשיו</button><button class="secondary" data-cancel>מאוחר יותר</button></div></div>`, () => { updateUi.installPromptOpen = false; });
+  m.wrap.querySelector('[data-cancel]').onclick = m.close;
+  m.wrap.querySelector('#approveInstall').onclick = () => {
+    const g = updateGuard.state();
+    if (g.blocked) return promptPendingWrites(m);
+    if (g.needsDecision) return promptInstallDecision(m);
+    runUpdateInstall(m);
+  };
+};
+
+const runUpdateInstall = async (m, { discardUnsaved = false } = {}) => {
+  let result;
+  try { result = await window.electronAPI.installUpdate({ discardUnsaved }); }
+  catch { toast('התקנת העדכון נכשלה. נסו שוב.', 'danger'); return; }
+  // The desktop process enforces the same guard: a refusal means state changed
+  // since this dialog opened (a write started, or a form was edited).
+  if (result && result.installed === false) {
+    toast(result.reason === 'pending-writes' ? 'יש שמירות שעדיין מתבצעות - ההתקנה תתאפשר כשיסתיימו' : 'יש טפסים עם שינויים שלא נשמרו', 'warning');
+    return;
+  }
+  updateUi.installPromptOpen = false;
+  m.close();
+};
+
+// A pending write (a save or an upload mid-flight) blocks the install
+// outright - no discard is offered for a half-written bank record or file.
+const promptPendingWrites = (installModal) => {
+  const risk = updateGuard.describe();
+  const m = modal('שמירות עדיין מתבצעות', `<div class="form-grid"><p>לא ניתן להתקין כרגע: ${esc(risk)}.</p><p class="muted">ההתקנה סוגרת את האפליקציה מיד, וקטיעה באמצע שמירה עלולה להשאיר רישום חלקי. המתינו כמה שניות עד שהשמירה מסתיימת, ואז לחצו שוב על כפתור העדכון.</p><div class="button-row"><button class="primary" id="backToWait">חזרה</button><button class="secondary" data-cancel>ביטול</button></div></div>`);
+  m.wrap.querySelector('[data-cancel]').onclick = () => { m.close(); };
+  m.wrap.querySelector('#backToWait').onclick = () => { m.close(); installModal.close(); };
+};
+
+// Once no write is pending, unsaved form changes still need an explicit
+// decision: go back and save, discard and install anyway, or cancel.
+const promptInstallDecision = (installModal) => {
+  const risk = updateGuard.describe();
+  const m = modal('יש שינויים שלא נשמרו', `<div class="form-grid"><p>לפני ההתקנה צריך להחליט מה לעשות עם ${esc(risk)}.</p><p class="muted">ההתקנה סוגרת את האפליקציה מיד. שינויים שלא נשמרו יאבדו. הנתונים שכבר נשמרו לא ייפגעו.</p><div class="button-row"><button class="primary" id="backToSave">חזרה לשמירה</button><button class="danger" id="discardAndInstall">התקנה בכל זאת</button><button class="secondary" data-cancel>ביטול</button></div></div>`);
+  m.wrap.querySelector('[data-cancel]').onclick = () => { m.close(); };
+  m.wrap.querySelector('#backToSave').onclick = () => { m.close(); installModal.close(); };
+  m.wrap.querySelector('#discardAndInstall').onclick = () => { m.close(); runUpdateInstall(installModal, { discardUnsaved: true }); };
+};
+
+// The desktop process keeps its own copy of the guard state so the
+// update-install IPC enforces it even if a caller skips these dialogs.
+updateGuard.onChange((s) => window.electronAPI?.reportUpdateGuard?.(s));
+window.electronAPI?.reportUpdateGuard?.(updateGuard.state());
+
+const onUpdateButtonClick = async () => {
+  const status = updateUi.state?.status;
+  if (status === 'available') return promptDownloadUpdate();
+  if (status === 'downloaded') return promptInstallUpdate();
+  updateUi.manualCheck = true;
+  try { await window.electronAPI.checkForUpdates(); } catch { toast('בדיקת העדכון נכשלה. נסו שוב מאוחר יותר.', 'danger'); updateUi.manualCheck = false; }
+};
+
+if (window.electronAPI?.getUpdateState) {
+  window.electronAPI.onUpdateStatus((s) => {
+    const previous = updateUi.state?.status;
+    updateUi.state = s;
+    renderUpdateButton();
+    if (s.status === 'downloaded' && previous !== 'downloaded') promptInstallUpdate();
+    if (updateUi.manualCheck && s.status === 'uptodate') { toast('האפליקציה מעודכנת לגרסה האחרונה', 'success'); updateUi.manualCheck = false; }
+    if (updateUi.manualCheck && s.status === 'error') { toast('בדיקת העדכון נכשלה. נסו שוב מאוחר יותר.', 'danger'); updateUi.manualCheck = false; }
+    if (s.status === 'available' && previous !== 'available' && previous !== 'idle') toast('נמצא עדכון חדש - לחצו על כפתור העדכון למעלה', 'info');
+  });
+  window.electronAPI.getUpdateState().then((s) => { updateUi.state = s; renderUpdateButton(); });
+}
 
 window.electronAPI?.onNotificationRefresh(() => loadApp());
 setInterval(() => { if (state.user) loadApp(); }, 15 * 60 * 1000);
