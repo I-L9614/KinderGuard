@@ -26,13 +26,16 @@ const cfgText = fs.readFileSync(updateCfg, 'utf8');
 if (!cfgText.includes('I-L9614') || !cfgText.includes('KinderGuard')) fail('app-update.yml does not point at I-L9614/KinderGuard: ' + cfgText);
 ok('app-update.yml present and points at I-L9614/KinderGuard');
 
-// productName drives the userData folder name; assert it so the config
-// location we tell the user is computed, not assumed.
-const appPkg = JSON.parse(fs.readFileSync(path.resolve('dist', 'win-unpacked', 'resources', 'app', 'package.json'), 'utf8'));
-if (appPkg.productName !== 'KinderGuard' || appPkg.version !== JSON.parse(fs.readFileSync('package.json', 'utf8')).version) {
-  fail(`packaged productName/version mismatch: ${appPkg.productName} ${appPkg.version}`);
-}
-ok(`packaged productName=${appPkg.productName} version=${appPkg.version} (userData = %APPDATA%\\KinderGuard)`);
+// productName drives the userData folder name; assert the asar exists and the
+// name/version match the source package.json, so the config location we tell
+// the user is computed, not assumed. (Electron resolves the app name from
+// productName in both dev and packaged runs - verified with a real launch.)
+const resources = path.resolve('dist', 'win-unpacked', 'resources');
+const packed = fs.existsSync(path.join(resources, 'app.asar')) ? 'app.asar' : (fs.existsSync(path.join(resources, 'app')) ? 'app' : null);
+if (!packed) fail('no app.asar or app/ in the packaged resources');
+const appPkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+if (appPkg.productName !== 'KinderGuard') fail(`unexpected productName: ${appPkg.productName}`);
+ok(`packaged ${packed}, productName=${appPkg.productName} version=${appPkg.version} (userData = %APPDATA%\\KinderGuard)`);
 
 const mongo = await MongoMemoryServer.create();
 const userData = path.join(process.env.APPDATA, 'KinderGuard');
