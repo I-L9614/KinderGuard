@@ -172,6 +172,11 @@ export async function captureUiEvidence({ exe, outDir, cdpPort, fail, ok }) {
     captureScreen('rent-payers.png');
     ok('rent page shows payer chips incl. private (פרטי) and private wording (rent-payers.png)');
 
+    // v0.3.3 wording: the authority-creation button names the direction.
+    const payeeWording = await evalJs('return document.body.innerText.includes("גוף לתשלום")');
+    if (!payeeWording) fail('rent page missing the "גוף לתשלום" button wording');
+    ok('rent page shows the "גוף לתשלום" button wording');
+
     // Amount-less office rental (v0.3.2): a property branch (kept out of the
     // daycare/permits list) plus an outgoing agreement with NO amounts must
     // render as "not entered yet" - never as ₪0 and never as a scheduled
