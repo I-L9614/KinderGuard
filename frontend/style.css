@@ -93,3 +93,4 @@
   .task-actions .icon-button{min-height:40px;min-width:40px}
   .toast{left:12px;right:12px;bottom:12px;max-width:none}
 }
+.row-flash{animation:rowFlash 1.2s ease-in-out 3}@keyframes rowFlash{0%,100%{background:transparent}50%{background:#fff3d6}}

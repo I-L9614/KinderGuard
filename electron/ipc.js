@@ -19,7 +19,13 @@ export const setupIpcHandlers = (getMainWindow = () => null) => {
     });
     notification.on('click', () => {
       const win = getMainWindow();
-      if (win) { win.show(); win.focus(); }
+      if (win) {
+        win.show();
+        win.focus();
+        // Deep-route into the relevant permit/rent record; the renderer falls
+        // back to the alerts inbox for stale or out-of-scope targets.
+        if (payload?.target) win.webContents.send('open-alert', payload.target);
+      }
     });
     notification.show();
     return true;

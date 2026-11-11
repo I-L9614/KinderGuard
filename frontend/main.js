@@ -106,18 +106,23 @@ const loadApp = async () => {
     state.types = await api('/api/license-types');
     if (state.branchId && !state.branches.some((b) => b._id === state.branchId)) state.branchId = null;
     render();
-    const seen = JSON.parse(localStorage.getItem('seenNotifications') || '[]');
-    const unseen = state.alerts.filter((item) => item.status === 'Open' && !seen.includes(item._id));
-    unseen.forEach((item) => {
-      const isRent = item.kind === 'Rent';
-      const body = isRent
-        ? (item.rentTrigger === 'month_before_series_end' ? `סדרת צ'קים מסתיימת · ${item.branchName || branchName(item.branchId)}` : `תשלום שכירות קרוב · ${item.branchName || branchName(item.branchId)}`)
-        : `${typeName(item.licenseId?.licenseTypeId)} · ${branchName(item.branchId)}`;
-      window.electronAPI?.notify({ title: isRent ? 'KinderGuard · תזכורת תשלום' : 'KinderGuard · תזכורת לחידוש', body });
-    });
-    if (unseen.length) {
+    // Native Windows toasts: one summary on the first refresh of the session
+    // (no burst after the app was closed), individual typed toasts afterwards.
+    // Works while the window is hidden to the tray; nothing runs once quit.
+    const seen = JSON.parse(localStorage.getItem(SEEN_KEY) || '[]');
+    const firstOfSession = !sessionStorage.getItem(SESSION_KEY);
+    sessionStorage.setItem(SESSION_KEY, '1');
+    const plan = planNativeToasts(state.alerts, { seenIds: seen, firstOfSession });
+    if (plan.mode === 'summary') {
+      window.electronAPI?.notify(summaryToastPayload(plan.count));
       playNotificationSound();
-      localStorage.setItem('seenNotifications', JSON.stringify([...seen, ...unseen.map((item) => item._id)].slice(-1000)));
+    } else if (plan.mode === 'individual') {
+      const helpers = { typeName, branchName, date, money };
+      plan.items.forEach((item) => window.electronAPI?.notify(alertToastPayload(item, helpers)));
+      playNotificationSound();
+    }
+    if (plan.seen.length) {
+      localStorage.setItem(SEEN_KEY, JSON.stringify([...seen, ...plan.seen].slice(-1000)));
     }
   } catch (error) {
     if (error.status === 401) { state.user = null; state.token = null; renderAuth(); }
@@ -188,7 +193,7 @@ const renderBranch = async () => {
   let types;
   try { types = await api(`/api/license-types?branchId=${branch._id}`); }
   catch (error) { app.innerHTML = `<button class="back-link" id="back">← כל הסניפים</button><section class="panel"><h3>לא ניתן לטעון את פרטי הסניף</h3><p>${esc(error.message)}</p><button class="secondary" id="retryBranch">ניסיון חוזר</button></section>`; document.getElementById('back').onclick = () => { state.branchId = null; renderBranches(); }; document.getElementById('retryBranch').onclick = renderBranch; return; }
-  app.innerHTML = `<button class="back-link" id="back">← כל הסניפים</button><section class="branch-title"><div><div class="eyebrow">פרטי סניף</div><h2>${esc(branch.name)}</h2><p>${esc(branch.address || 'כתובת לא הוגדרה')}</p></div><div class="button-row">${state.user.role === 'Admin' ? '<button class="secondary" id="addType">＋ סוג אישור</button>' : ''}<button class="primary" id="addLicense">＋ העלאת אישור</button></div></section><section class="stats-grid compact"><article class="stat-card"><div><strong>${licenses.length}</strong><small>אישורים פעילים</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Valid').length}</strong><small>בתוקף</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Expiring_Soon').length}</strong><small>לקראת פקיעה</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Expired').length}</strong><small>פגו</small></div></article></section><section class="panel"><div class="section-heading"><div><h3>אישורי הסניף</h3><p>האישור החדש ביותר מכל סוג מוצג כאן</p></div><span class="muted">${licenses.length} פעילים</span></div>${licenses.length ? `<input type="search" class="search-input" id="licenseSearch" placeholder="חיפוש אישור לפי סוג או שם קובץ" aria-label="חיפוש אישור"><div class="license-list" id="licenseList">${licenses.map((license) => `<article class="license-row" data-search="${esc(typeName(license.licenseTypeId) + ' ' + (license.fileName || ''))}"><div class="license-icon ${statusClass(license.status)}">▤</div><div class="license-main"><strong>${esc(typeName(license.licenseTypeId))}</strong><small>תוקף ${date(license.issueDate)} — ${date(license.expiryDate)} ${license.fileName && license.fileUrl ? `· <button class="file-link link-button" data-open-file="${license._id}">${esc(license.fileName)}</button>` : ''}</small></div><span class="status-pill ${statusClass(license.status)}">${statusText(license.status)}</span><button class="text-button" data-history="${license._id}">היסטוריה</button></article>`).join('')}</div><div class="empty-state small" id="noLicenseMatches" hidden><span>▤</span><h3>לא נמצאו אישורים תואמים</h3><p>נסו לשנות את מילות החיפוש.</p></div>` : `<div class="empty-state small"><span>▤</span><h3>אין עדיין אישורים בסניף</h3><p>הגדירו סוג אישור והעלו את המסמך הראשון.</p></div>`}</section><section class="panel"><div class="section-heading"><div><h3>סוגי האישורים לסניף</h3><p>סוגים כלליים וגם סוגים שהוגדרו רק לסניף זה</p></div></div><div class="type-chips">${types.map((t) => `<span class="type-chip">${esc(t.name)}${t.branchId ? '<small>סניף זה</small>' : '<small>כל הסניפים</small>'}</span>`).join('') || '<span class="muted">לא הוגדרו עדיין סוגי אישור</span>'}</div></section><section id="historyPanel"></section>`;
+  app.innerHTML = `<button class="back-link" id="back">← כל הסניפים</button><section class="branch-title"><div><div class="eyebrow">פרטי סניף</div><h2>${esc(branch.name)}</h2><p>${esc(branch.address || 'כתובת לא הוגדרה')}</p></div><div class="button-row">${state.user.role === 'Admin' ? '<button class="secondary" id="addType">＋ סוג אישור</button>' : ''}<button class="primary" id="addLicense">＋ העלאת אישור</button></div></section><section class="stats-grid compact"><article class="stat-card"><div><strong>${licenses.length}</strong><small>אישורים פעילים</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Valid').length}</strong><small>בתוקף</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Expiring_Soon').length}</strong><small>לקראת פקיעה</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Expired').length}</strong><small>פגו</small></div></article></section><section class="panel"><div class="section-heading"><div><h3>אישורי הסניף</h3><p>האישור החדש ביותר מכל סוג מוצג כאן</p></div><span class="muted">${licenses.length} פעילים</span></div>${licenses.length ? `<input type="search" class="search-input" id="licenseSearch" placeholder="חיפוש אישור לפי סוג או שם קובץ" aria-label="חיפוש אישור"><div class="license-list" id="licenseList">${licenses.map((license) => `<article class="license-row" data-license-id="${license._id}" data-search="${esc(typeName(license.licenseTypeId) + ' ' + (license.fileName || ''))}"><div class="license-icon ${statusClass(license.status)}">▤</div><div class="license-main"><strong>${esc(typeName(license.licenseTypeId))}</strong><small>תוקף ${date(license.issueDate)} — ${date(license.expiryDate)} ${license.fileName && license.fileUrl ? `· <button class="file-link link-button" data-open-file="${license._id}">${esc(license.fileName)}</button>` : ''}</small></div><span class="status-pill ${statusClass(license.status)}">${statusText(license.status)}</span><button class="text-button" data-history="${license._id}">היסטוריה</button></article>`).join('')}</div><div class="empty-state small" id="noLicenseMatches" hidden><span>▤</span><h3>לא נמצאו אישורים תואמים</h3><p>נסו לשנות את מילות החיפוש.</p></div>` : `<div class="empty-state small"><span>▤</span><h3>אין עדיין אישורים בסניף</h3><p>הגדירו סוג אישור והעלו את המסמך הראשון.</p></div>`}</section><section class="panel"><div class="section-heading"><div><h3>סוגי האישורים לסניף</h3><p>סוגים כלליים וגם סוגים שהוגדרו רק לסניף זה</p></div></div><div class="type-chips">${types.map((t) => `<span class="type-chip">${esc(t.name)}${t.branchId ? '<small>סניף זה</small>' : '<small>כל הסניפים</small>'}</span>`).join('') || '<span class="muted">לא הוגדרו עדיין סוגי אישור</span>'}</div></section><section id="historyPanel"></section>`;
   document.getElementById('back').onclick = () => { state.branchId = null; renderBranches(); };
   document.getElementById('addLicense').onclick = () => licenseForm(branch, types);
   document.getElementById('addType')?.addEventListener('click', () => licenseTypeForm(branch));
@@ -213,6 +218,10 @@ const renderBranch = async () => {
     document.getElementById('closeHistory').onclick = () => panel.innerHTML = '';
     panel.querySelectorAll('[data-open-file]').forEach((button) => button.onclick = () => openLicenseFile(button.dataset.openFile));
   });
+  if (state.highlightLicenseId) {
+    flashRow(`[data-license-id="${state.highlightLicenseId}"]`);
+    state.highlightLicenseId = null;
+  }
 };
 
 const modal = (title, content, onClose) => {
@@ -391,7 +400,7 @@ const renderRent = async () => {
   };
   app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">תשלומי שכירות</div><h2>שכירות לרשויות</h2><p>מעקב תשלומי שכר דירה למועצות לפי מעון. תיעוד בלבד, ללא העברת כסף בפועל.</p></div><div class="button-row"><button class="secondary" id="newAuthority">＋ רשות חדשה</button><button class="secondary" id="newGroup">₪ תשלום מרוכז</button><button class="primary" id="newAgreement">＋ הסכם שכירות</button></div></section>
   <section class="stats-grid"><article class="stat-card"><span class="stat-icon teal">₪</span><div><strong>${money(annualTotal)}</strong><small>סה״כ שנתי, כל הרשויות</small></div></article><article class="stat-card"><span class="stat-icon amber">${upcoming.length}</span><div><strong>תשלומים קרובים</strong><small>ב־30 הימים הבאים</small></div></article><article class="stat-card"><span class="stat-icon blue">${handedCount}</span><div><strong>צ'קים מופקדים</strong><small>נמסרו, טרם נפרעו</small></div></article><article class="stat-card clickable" id="rentAlertsCard"><span class="stat-icon coral">${rentAlerts}</span><div><strong>תזכורות פעילות</strong><small>מועדי תשלום וסדרות צ'קים</small></div></article></section>
-  ${upcoming.length ? `<section class="panel"><div class="section-heading"><div><h3>תשלומים קרובים</h3><p>30 הימים הבאים, לפי מועד פרעון</p></div></div><div class="license-list">${upcoming.map((p) => { const [cls, txt] = rentStatusPill(p.status); return `<article class="license-row"><div class="license-icon ${p.status === 'Handed' ? 'warning' : ''}">${p.method === 'cheque' ? '✎' : '⇄'}</div><div class="license-main"><strong>${esc(p.branchName)}</strong><small>${esc(p.authorityName)} · ${rentMethodText(p.method)} · פרעון ${date(p.dueDate)}</small></div><span class="amount-cell">${money(p.amount)}</span><span class="status-pill ${cls}">${txt}</span>${p.method === 'cheque' && p.status === 'Pending' ? `<button class="text-button" data-rent-handed="${p._id}">סמן כנמסר</button>` : ''}<button class="text-button" data-rent-cleared="${p._id}">סמן כנפרע</button></article>`; }).join('')}</div></section>` : ''}
+  ${upcoming.length ? `<section class="panel"><div class="section-heading"><div><h3>תשלומים קרובים</h3><p>30 הימים הבאים, לפי מועד פרעון</p></div></div><div class="license-list">${upcoming.map((p) => { const [cls, txt] = rentStatusPill(p.status); return `<article class="license-row" data-payment-id="${p._id}"><div class="license-icon ${p.status === 'Handed' ? 'warning' : ''}">${p.method === 'cheque' ? '✎' : '⇄'}</div><div class="license-main"><strong>${esc(p.branchName)}</strong><small>${esc(p.authorityName)} · ${rentMethodText(p.method)} · פרעון ${date(p.dueDate)}</small></div><span class="amount-cell">${money(p.amount)}</span><span class="status-pill ${cls}">${txt}</span>${p.method === 'cheque' && p.status === 'Pending' ? `<button class="text-button" data-rent-handed="${p._id}">סמן כנמסר</button>` : ''}<button class="text-button" data-rent-cleared="${p._id}">סמן כנפרע</button></article>`; }).join('')}</div></section>` : ''}
   ${authorities.length ? `<div class="type-chips" style="margin-bottom:18px"><button class="type-chip rent-filter" data-authority="" style="${!filterId ? 'border-color:var(--teal);background:#eaf5f2' : ''}"><strong>כל הרשויות</strong></button>${authorities.map((a) => `<button class="type-chip rent-filter" data-authority="${a._id}" style="${filterId === a._id ? 'border-color:var(--teal);background:#eaf5f2' : ''}">${esc(a.name)}</button>`).join('')}</div>` : ''}
   ${visibleAuthorities.length ? visibleAuthorities.map(authorityPanel).join('') : `<div class="empty-state"><span>₪</span><h3>${authorities.length ? 'לא נמצאה רשות מתאימה' : 'עוד אין רשויות'}</h3><p>${authorities.length ? 'נסו סינון אחר.' : 'הוסיפו את הרשות הראשונה ואז הגדירו הסכם שכירות לכל מעון.'}</p></div>`}
   ${groups.length ? `<section class="panel"><div class="section-heading"><div><h3>תשלומים מרוכזים</h3><p>צ'ק או העברה אחת שמחולקת בין מספר מעונות</p></div></div><div class="license-list">${groups.map((g) => { const [cls, txt] = rentStatusPill(g.status); return `<article class="license-row"><div class="license-icon ${g.status === 'Handed' ? 'warning' : ''}">${g.method === 'cheque' ? '✎' : '⇄'}</div><div class="license-main"><strong>${esc(g.authorityName)} · ${money(g.totalAmount)}</strong><small>${rentMethodText(g.method)} · מועד ${date(g.dueDate)} · ${g.allocations.map((a) => `${esc(a.branchName)} ${money(a.amount)}`).join(' + ')}</small></div><span class="status-pill ${cls}">${txt}</span>${g.method === 'cheque' && g.status === 'Pending' ? `<button class="text-button" data-group-handed="${g._id}">סמן כנמסר</button>` : ''}${['Pending', 'Handed'].includes(g.status) ? `<button class="text-button" data-group-cleared="${g._id}">סמן כנפרע</button><button class="text-button danger-text" data-group-cancel="${g._id}">ביטול</button>` : ''}${['Handed', 'Cleared'].includes(g.status) ? `<button class="text-button" data-group-revert="${g._id}">בטל סימון</button>` : ''}</article>`; }).join('')}</div></section>` : ''}
@@ -454,6 +463,17 @@ const renderRent = async () => {
     document.getElementById('closeRentHistory').onclick = () => { panel.innerHTML = ''; };
     panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });
+  // Landed from a native toast: flash the relevant payment row, else the
+  // agreement row; a row that no longer shows (far-future payment, changed
+  // filter) just does not flash.
+  if (state.highlightPaymentId || state.highlightAgreementId) {
+    if (state.highlightPaymentId) flashRow(`[data-payment-id="${state.highlightPaymentId}"]`);
+    if (!state.highlightPaymentId || !document.querySelector('.row-flash')) {
+      if (state.highlightAgreementId) flashRow(`[data-rent-history="${state.highlightAgreementId}"]`);
+    }
+    state.highlightPaymentId = null;
+    state.highlightAgreementId = null;
+  }
 };
 
 const authorityForm = () => {
@@ -673,5 +693,27 @@ if (window.electronAPI?.getUpdateState) {
 }
 
 window.electronAPI?.onNotificationRefresh(() => loadApp());
+
+// Clicking a native toast: focus the app (done by the main process) and land on
+// the relevant record; stale/deleted/unauthorized targets fall back to the inbox.
+const openAlertTarget = (target) => {
+  const route = resolveAlertTarget(target, state);
+  state.highlightLicenseId = route.highlightLicenseId || null;
+  state.highlightPaymentId = route.highlightPaymentId || null;
+  state.highlightAgreementId = route.highlightAgreementId || null;
+  state.branchId = route.page === 'branches' ? route.branchId : null;
+  state.page = route.page;
+  render();
+};
+window.electronAPI?.onOpenAlert(openAlertTarget);
+
+// Flash a highlighted row once its view has rendered; missing rows just do not flash.
+const flashRow = (selector) => {
+  const row = document.querySelector(selector);
+  if (!row) return;
+  row.classList.add('row-flash');
+  row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  setTimeout(() => row.classList.remove('row-flash'), 4000);
+};
 setInterval(() => { if (state.user) loadApp(); }, 15 * 60 * 1000);
 loadApp().catch((error) => { renderAuth(); toast(error.message || 'לא ניתן לפתוח את KinderGuard כרגע.', 'danger'); });
