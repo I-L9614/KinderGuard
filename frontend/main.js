@@ -2,6 +2,10 @@ import { createUpdateGuard } from './updateGuard.js';
 import { SEEN_KEY, SESSION_KEY, planNativeToasts, resolveAlertTarget, alertToastPayload, summaryToastPayload, testToastPayloads } from './nativeNotify.js';
 
 const app = document.getElementById('app');
+// Show where this UI is actually served from (embedded loopback on the
+// developer's PC, or the hosted server for the website/client mode).
+{ const el = document.getElementById('server-origin'); if (el) el.textContent = 'שרת: ' + location.host; }
+
 const headerActions = document.getElementById('header-actions');
 // Tracks unsaved form input and in-flight uploads so the self-closing update
 // install can demand an explicit save/discard decision first.
