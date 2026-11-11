@@ -1,0 +1,19 @@
+# Keep-alive for the free Render instance that hosts KinderGuard.
+# Render free web services sleep after 15 minutes without inbound traffic
+# (https://render.com/docs/free). This workflow sends one ordinary request to
+# /health every 10 minutes so the server stays awake. One always-awake free
+# service uses ~744 of the 750 free instance-hours each month - fine while
+# this is the workspace's only free service; revisit before adding another.
+# If a scheduled run is delayed past the sleep window, the only cost is one
+# ~1 minute slow open while Render spins the service back up.
+name: keepalive
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping the hosted server
+        run: curl -fsS -o /dev/null -w '%{http_code}\n' https://kinderguard-server.onrender.com/health
