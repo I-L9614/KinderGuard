@@ -172,6 +172,40 @@ export async function captureUiEvidence({ exe, outDir, cdpPort, fail, ok }) {
     captureScreen('rent-payers.png');
     ok('rent page shows payer chips incl. private (פרטי) and private wording (rent-payers.png)');
 
+    // Amount-less office rental (v0.3.2): a property branch (kept out of the
+    // daycare/permits list) plus an outgoing agreement with NO amounts must
+    // render as "not entered yet" - never as ₪0 and never as a scheduled
+    // payment. This is the exact misreading the user said to avoid.
+    const office = await post('/api/branches', { name: 'משרד בדיקת עשן', kind: 'property' });
+    const landlord = await post('/api/rent/authorities', { name: 'משכיר בדיקת עשן', type: 'private' });
+    await post('/api/rent/agreements', { branchId: office._id, authorityId: landlord._id, direction: 'outgoing' });
+    ok('seeded a property branch and an amount-less outgoing agreement through the real API');
+
+    // The property must not appear on the daycare branches page.
+    await evalJs('document.querySelector(\'[data-page="branches"]\').click(); return true;');
+    await sleep(1500);
+    const officeLeaked = await evalJs('return document.body.innerText.includes("משרד בדיקת עשן")');
+    if (officeLeaked) fail('property branch leaked into the daycare branches page');
+    ok('property branch stays out of the daycare/permits branch list');
+
+    // The rent page shows the record with placeholder wording and no ₪0.
+    await evalJs('document.querySelector(\'[data-page="rent"]\').click(); return true;');
+    let officeRow = false;
+    for (let i = 0; i < 15 && !officeRow; i++) {
+      await sleep(1500);
+      officeRow = await evalJs('return document.body.innerText.includes("משרד בדיקת עשן") && document.body.innerText.includes("טרם הוזן")');
+    }
+    if (!officeRow) fail('amount-less office agreement does not render with the "טרם הוזן" placeholder');
+    const wording = await evalJs(`return {
+      marker: document.body.innerText.includes('(שכירות שאנחנו משלמים)'),
+      later: document.body.innerText.includes('הסכום והמועדים יוזנו בהמשך'),
+      zero: /₪\\s*0(?!\\d)/.test(document.body.innerText),
+    };`);
+    if (!wording.marker || !wording.later) fail('amount-less office agreement missing outgoing marker or later-entry wording: ' + JSON.stringify(wording));
+    if (wording.zero) fail('amount-less office agreement renders a ₪0 amount - the exact misreading to avoid');
+    captureScreen('rent-amountless-office.png');
+    ok('amount-less outgoing office record renders "טרם הוזן" with no ₪0 (rent-amountless-office.png)');
+
     ws.close();
     await sleep(500);
   } finally {
