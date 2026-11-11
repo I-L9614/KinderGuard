@@ -21,10 +21,11 @@ KinderGuard helps a daycare operator manage permits and renewal work across mult
 
 ## New installation
 
-1. Copy `.env.example` to `.env` and configure `MONGO_URI`, `JWT_SECRET`, `S3_BUCKET_NAME`, and `S3_REGION`.
-2. Install dependencies with `npm install`.
-3. Launch with `npm run electron`.
-4. Create the first administrator account from the sign-in screen. The administrator can add users and assign branches from **הגדרות וצוות**.
+From source: copy `.env.example` to `.env`, configure `MONGO_URI`, `JWT_SECRET`, `S3_BUCKET_NAME`, and `S3_REGION`, run `npm install`, then `npm run electron`.
+
+From the Windows installer: the packaged app reads its `.env` from the per-user data folder `%APPDATA%\KinderGuard\.env` - outside the install directory, so updates never overwrite it. On first launch without that file the app says exactly where it goes and offers to open the folder. Copy the existing `.env` there once; only `MONGO_URI` and `JWT_SECRET` are required to start - document storage (S3) is optional until it is activated, and everything else works without it. Data itself lives in the shared cloud database and the same per-user folder (verified identical name between dev and packaged runs), so it carries over from the source-folder setup and between versions. The installer is per-user (no admin needed), installs under `%LOCALAPPDATA%\Programs`, and never touches the data folder or an old source folder.
+
+After signing in, the administrator can add users and assign branches from **הגדרות וצוות**.
 
 ## In-app updates
 

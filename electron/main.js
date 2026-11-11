@@ -1,9 +1,18 @@
-import { app, BrowserWindow, Tray, Menu, nativeImage, dialog } from 'electron';
+import { app, BrowserWindow, Tray, Menu, nativeImage, dialog, shell } from 'electron';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { startServer, stopServer } from '../src/server.js';
 import { setupIpcHandlers, setupUpdateIpcHandlers } from './ipc.js';
 import { createUpdateController, startUpdateScheduling } from './updater.js';
+
+// The embedded server's configuration (.env with MONGO_URI, JWT_SECRET and
+// the S3 settings) lives in the per-user data folder, outside the install
+// directory, so updates never touch it. env.js reads KINDERGUARD_CONFIG_DIR;
+// it must be set BEFORE the server module loads, hence the dynamic import.
+const configDir = app.getPath('userData');
+process.env.KINDERGUARD_CONFIG_DIR = configDir;
+const hasServerConfig = fs.existsSync(path.join(configDir, '.env')) || fs.existsSync(path.resolve(process.cwd(), '.env'));
+const { startServer, stopServer } = await import('../src/server.js');
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -174,6 +183,25 @@ if (!handleSingleInstance()) {
 app.whenReady().then(async () => {
   if (isWindows) {
     app.setAppUserModelId('com.kinderguard.desktop');
+  }
+
+  // First launch after installing: without the configuration file the app
+  // cannot start. Say exactly what is missing and where it goes, and offer
+  // to open that folder.
+  if (!hasServerConfig) {
+    fs.mkdirSync(configDir, { recursive: true });
+    const choice = await dialog.showMessageBox({
+      type: 'info',
+      title: 'נדרש קובץ הגדרות',
+      message: 'KinderGuard צריך את קובץ ההגדרות (.env) כדי לפעול.',
+      detail: `העתיקו את קובץ ה-.env שלכם (עם MONGO_URI, JWT_SECRET והגדרות ה-S3) אל התיקייה:\n${configDir}\n\nאם התקנתם בעבר והקובץ קיים שם, פשוט הפעילו מחדש. בלחיצה על \"פתיחת התיקייה\" התיקייה תיפתח כדי שתוכלו להעתיק אליה את הקובץ.`,
+      buttons: ['פתיחת התיקייה', 'סגירה'],
+    });
+    if (choice.response === 0) {
+      await shell.openPath(configDir);
+    }
+    app.quit();
+    return;
   }
 
   initializeTray();
