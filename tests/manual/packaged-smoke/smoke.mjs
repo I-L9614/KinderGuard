@@ -33,9 +33,12 @@ ok('app-update.yml present and points at I-L9614/KinderGuard');
 const resources = path.resolve('dist', 'win-unpacked', 'resources');
 const packed = fs.existsSync(path.join(resources, 'app.asar')) ? 'app.asar' : (fs.existsSync(path.join(resources, 'app')) ? 'app' : null);
 if (!packed) fail('no app.asar or app/ in the packaged resources');
-const appPkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-if (appPkg.productName !== 'KinderGuard') fail(`unexpected productName: ${appPkg.productName}`);
-ok(`packaged ${packed}, productName=${appPkg.productName} version=${appPkg.version} (userData = %APPDATA%\\KinderGuard)`);
+// electron-builder reads the app name from build.productName (falling back to
+// the top-level productName), and Electron uses it for the userData folder.
+const srcPkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+const productName = srcPkg.build?.productName || srcPkg.productName || srcPkg.name;
+if (productName !== 'KinderGuard') fail(`unexpected productName: ${productName}`);
+ok(`packaged ${packed}, productName=${productName} version=${srcPkg.version} (userData = %APPDATA%\\KinderGuard)`);
 
 const mongo = await MongoMemoryServer.create();
 const userData = path.join(process.env.APPDATA, 'KinderGuard');
