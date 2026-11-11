@@ -20,6 +20,7 @@ const apiStub = (url) => {
   if (p === '/api/notifications') return [];
   if (p === '/api/tasks') return [];
   if (p === '/api/license-types') return [type];
+  if (p === '/api/users') return [];
   throw new Error('unstubbed endpoint: ' + p);
 };
 
@@ -27,8 +28,10 @@ const flush = () => new Promise((r) => setTimeout(r, 50));
 
 describe('renderer boot (real main.js)', () => {
   let openAlert;
+  let notifyMock;
   beforeEach(async () => {
     vi.resetModules();
+    notifyMock = vi.fn(async () => true);
     document.body.innerHTML = `
       <div class="app-shell">
         <header class="topbar">
@@ -55,7 +58,7 @@ describe('renderer boot (real main.js)', () => {
       onUpdateStatus: () => {},
       onNotificationRefresh: () => {},
       onLog: () => {},
-      notify: async () => true,
+      notify: notifyMock,
       checkLicensesNow: async () => ({}),
       onOpenAlert: (cb) => { openAlert = cb; },
     };
@@ -89,5 +92,41 @@ describe('renderer boot (real main.js)', () => {
     await flush();
     // Admin here: routes to rent page (content may fail to load without stubs; the nav state is what matters)
     expect(document.querySelector('[data-page="rent"]')?.classList.contains('selected')).toBe(true);
+  });
+
+  it('settings self-test fires three clearly-marked test toasts through the same notify bridge', async () => {
+    document.querySelector('[data-page="settings"]').click();
+    await flush();
+    const button = document.getElementById('testToasts');
+    expect(button).not.toBeNull();
+    vi.useFakeTimers();
+    try {
+      button.click();
+      await vi.advanceTimersByTimeAsync(20000);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(notifyMock).toHaveBeenCalledTimes(3);
+    const [permit, rent, summary] = notifyMock.mock.calls.map(([p]) => p);
+    // every test toast is unmistakably marked as a test, no real data
+    for (const p of [permit, rent, summary]) {
+      expect(p.title).toMatch(/^בדיקה · /);
+      expect(p.body).toContain('התראת בדיקה');
+    }
+    // fixture targets never match real records: safe routings only
+    expect(permit.target).toMatchObject({ kind: 'License', branchId: 'test-toast-branch', licenseId: 'test-toast-license' });
+    expect(rent.target).toMatchObject({ kind: 'Rent', rentAgreementId: 'test-toast-agreement' });
+    expect(summary.target).toEqual({ kind: 'Summary' });
+    // dedupe state untouched: test toasts never poison SEEN/SESSION
+    expect(localStorage.getItem('seenNotifications')).toBeNull();
+  });
+
+  it('self-test fixture targets route safely on an empty account', async () => {
+    openAlert({ id: 'test-toast-permit', kind: 'License', branchId: 'test-toast-branch', licenseId: 'test-toast-license' });
+    await flush();
+    expect(document.querySelector('.welcome-row h2')?.textContent).toContain('התראות');
+    openAlert({ kind: 'Summary' });
+    await flush();
+    expect(document.querySelector('.welcome-row h2')?.textContent).toContain('התראות');
   });
 });

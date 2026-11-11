@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { planNativeToasts, resolveAlertTarget, alertToastPayload, summaryToastPayload } from '../frontend/nativeNotify.js';
+import { planNativeToasts, resolveAlertTarget, alertToastPayload, summaryToastPayload, testToastPayloads } from '../frontend/nativeNotify.js';
 
 const licenseAlert = (over = {}) => ({
   _id: 'lic1', kind: 'License', status: 'Open', triggerDays: 7,
@@ -82,3 +82,29 @@ function helpers() {
     money: (n) => Number(n).toLocaleString('en-US'),
   };
 }
+
+describe('testToastPayloads (settings self-test fixtures)', () => {
+  const helpers = {
+    typeName: () => 'אישור',
+    branchName: () => 'סניף',
+    date: (v) => String(v),
+    money: (v) => `₪${v}`,
+  };
+  it('returns permit, rent and summary toasts, all marked as tests', () => {
+    const [permit, rent, summary] = testToastPayloads(helpers);
+    expect(permit.target.kind).toBe('License');
+    expect(rent.target.kind).toBe('Rent');
+    expect(summary.target.kind).toBe('Summary');
+    for (const p of [permit, rent, summary]) {
+      expect(p.title.startsWith('בדיקה · ')).toBe(true);
+      expect(p.body).toContain('התראת בדיקה');
+    }
+  });
+  it('fixture targets resolve to safe fallbacks on an empty account', () => {
+    const [permit, rent, summary] = testToastPayloads(helpers);
+    const empty = { user: { role: 'Admin' }, branches: [], licenses: [] };
+    expect(resolveAlertTarget(permit.target, empty)).toEqual({ page: 'alerts' });
+    expect(resolveAlertTarget(rent.target, empty)).toMatchObject({ page: 'rent' });
+    expect(resolveAlertTarget(summary.target, empty)).toEqual({ page: 'alerts' });
+  });
+});

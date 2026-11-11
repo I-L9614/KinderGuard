@@ -72,3 +72,23 @@ export const summaryToastPayload = (count) => ({
   body: count === 1 ? 'התראה אחת ממתינה לטיפול' : `${count} התראות ממתינות לטיפול`,
   target: { kind: 'Summary' },
 });
+
+// Settings-screen self test: three clearly-marked TEST toasts fired through
+// the exact same notify bridge, so a real PC can verify the Windows toast
+// pipeline (banner, sound, click -> focus -> in-app routing) without creating
+// real records. Fixture ids never match real data: the permit click exercises
+// the stale-target fallback to the alerts inbox, the rent click lands on the
+// rent page (admins), and the summary click opens the alerts inbox.
+export const testToastPayloads = (helpers) => {
+  const future = (days) => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+  const permit = alertToastPayload(
+    { _id: 'test-toast-permit', triggerDays: 30, licenseId: { _id: 'test-toast-license', expiryDate: future(30) }, branchId: 'test-toast-branch' },
+    helpers,
+  );
+  const rent = alertToastPayload(
+    { _id: 'test-toast-rent', kind: 'Rent', branchName: 'סניף בדיקה', amount: 5000, dueDate: future(7), rentAgreementId: 'test-toast-agreement', rentPaymentId: 'test-toast-payment' },
+    helpers,
+  );
+  const mark = (p) => ({ ...p, title: `בדיקה · ${p.title}`, body: `${p.body} · התראת בדיקה, לא נתון אמיתי` });
+  return [mark(permit), mark(rent), mark(summaryToastPayload(2))];
+};

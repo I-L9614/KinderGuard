@@ -1,5 +1,5 @@
 import { createUpdateGuard } from './updateGuard.js';
-import { SEEN_KEY, SESSION_KEY, planNativeToasts, resolveAlertTarget, alertToastPayload, summaryToastPayload } from './nativeNotify.js';
+import { SEEN_KEY, SESSION_KEY, planNativeToasts, resolveAlertTarget, alertToastPayload, summaryToastPayload, testToastPayloads } from './nativeNotify.js';
 
 const app = document.getElementById('app');
 const headerActions = document.getElementById('header-actions');
@@ -580,10 +580,28 @@ const rentGroupCancelForm = (group) => {
   };
 };
 
+// Fires the three fixture toasts from nativeNotify.testToastPayloads through
+// the same Electron notify bridge the real alerts use. The 10s head start
+// lets the user close the window with X first, which is exactly the hidden
+// path under test; nothing here touches the API, the DB, or the dedupe state.
+const runNotificationSelfTest = () => {
+  if (!window.electronAPI?.notify) { toast('התראות מערכת זמינות רק באפליקציה המותקנת במחשב', 'danger'); return; }
+  const payloads = testToastPayloads({ typeName, branchName, date, money });
+  toast('שלוש התראות בדיקה יקפצו בעוד 10 שניות - אפשר לסגור את החלון ב־X ולהמתין להן', 'success');
+  payloads.forEach((payload, index) => {
+    setTimeout(() => {
+      Promise.resolve(window.electronAPI.notify(payload))
+        .then((sent) => { if (sent === false) toast('התראות Windows לא זמינות כרגע - בדקו את הגדרות ההתראות של המערכת', 'danger'); })
+        .catch(() => toast('שליחת התראת הבדיקה נכשלה', 'danger'));
+    }, 10000 + index * 3000);
+  });
+};
+
 const renderSettings = async () => {
   let users;
   try { users = await api('/api/users'); } catch (error) { app.innerHTML = `<section class="panel"><h3>לא ניתן לטעון את ההגדרות</h3><p>${esc(error.message)}</p><button class="secondary" id="retrySettings">ניסיון חוזר</button></section>`; document.getElementById('retrySettings').onclick = renderSettings; return; }
-  app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">ניהול החשבון</div><h2>הגדרות וצוות</h2><p>הגדירו את האישורים הנדרשים והחליטו למי יש גישה לכל סניף.</p></div></section><section class="settings-grid"><section class="panel"><div class="section-heading"><div><h3>סוגי אישורים</h3><p>לכל הסניפים או לסניף מסוים</p></div><button class="primary small-btn" id="newType">＋ סוג אישור</button></div><div class="settings-types">${state.types.map((type) => `<div class="settings-type"><span>${esc(type.name)}<small>${type.branchId ? `רק ${esc(branchName(type.branchId))}` : 'כל הסניפים'}</small></span><button class="text-button danger-text" data-remove-type="${type._id}">הסרה</button></div>`).join('') || '<p class="muted">עדיין לא הוגדרו סוגי אישורים.</p>'}</div></section><section class="panel"><div class="section-heading"><div><h3>משתמשים</h3><p>משתמשים יכולים לטפל באישורים בסניפים שהוקצו להם</p></div><button class="primary small-btn" id="newUser">＋ הוספת משתמש</button></div><div class="settings-types">${users.map((u) => `<div class="settings-type"><span>${esc(u.name)}<small>${esc(u.email)} · ${u.role === 'Admin' ? 'גישה מלאה לכל הסניפים' : (u.accessibleBranches || []).map((b) => esc(b.name)).join(', ') || 'ללא סניפים'}</small></span><b class="role-label">${u.role === 'Admin' ? 'מנהל שותף' : 'משתמש'}</b></div>`).join('') || '<p class="muted">אין עדיין משתמשים נוספים.</p>'}</div></section></section>`;
+  app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">ניהול החשבון</div><h2>הגדרות וצוות</h2><p>הגדירו את האישורים הנדרשים והחליטו למי יש גישה לכל סניף.</p></div></section><section class="settings-grid"><section class="panel"><div class="section-heading"><div><h3>סוגי אישורים</h3><p>לכל הסניפים או לסניף מסוים</p></div><button class="primary small-btn" id="newType">＋ סוג אישור</button></div><div class="settings-types">${state.types.map((type) => `<div class="settings-type"><span>${esc(type.name)}<small>${type.branchId ? `רק ${esc(branchName(type.branchId))}` : 'כל הסניפים'}</small></span><button class="text-button danger-text" data-remove-type="${type._id}">הסרה</button></div>`).join('') || '<p class="muted">עדיין לא הוגדרו סוגי אישורים.</p>'}</div></section><section class="panel"><div class="section-heading"><div><h3>משתמשים</h3><p>משתמשים יכולים לטפל באישורים בסניפים שהוקצו להם</p></div><button class="primary small-btn" id="newUser">＋ הוספת משתמש</button></div><div class="settings-types">${users.map((u) => `<div class="settings-type"><span>${esc(u.name)}<small>${esc(u.email)} · ${u.role === 'Admin' ? 'גישה מלאה לכל הסניפים' : (u.accessibleBranches || []).map((b) => esc(b.name)).join(', ') || 'ללא סניפים'}</small></span><b class="role-label">${u.role === 'Admin' ? 'מנהל שותף' : 'משתמש'}</b></div>`).join('') || '<p class="muted">אין עדיין משתמשים נוספים.</p>'}</div></section><section class="panel"><div class="section-heading"><div><h3>בדיקת התראות</h3><p>שליחת שלוש התראות בדיקה של Windows (אישור, שכירות וסיכום). ההתראות מסומנות כבדיקה ולא יוצרות שום נתון אמיתי. הן יקפצו 10 שניות אחרי הלחיצה, כך שאפשר לסגור את החלון ב־X ולבדוק שהן מגיעות גם כשהתוכנה מוסתרת. לחיצה על התראה מחזירה לתוכנה ופותחת את המסך המתאים.</p></div><button class="primary small-btn" id="testToasts">שליחת התראות בדיקה</button></div></section></section>`;
+  document.getElementById('testToasts').onclick = runNotificationSelfTest;
   document.getElementById('newType').onclick = () => licenseTypeForm();
   document.getElementById('newUser').onclick = createUserForm;
   app.querySelectorAll('[data-remove-type]').forEach((button) => button.onclick = async () => { if (!confirm('להסיר את סוג האישור מהרשימה הפעילה? מסמכים שכבר הועלו יישמרו.')) return; try { await api(`/api/license-types/${button.dataset.removeType}`, { method: 'DELETE' }); await loadApp(); state.page = 'settings'; render(); } catch (error) { toast(error.message, 'danger'); } });
