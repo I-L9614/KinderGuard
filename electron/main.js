@@ -238,7 +238,7 @@ const createWindow = async () => {
 const scheduleBackgroundChecks = () => {
   setInterval(() => {
     if (mainWindow) mainWindow.webContents.send('notification-refresh-requested');
-  }, 15 * 60 * 1000);
+  }, 10 * 60 * 1000);
 };
 
 const handleSingleInstance = () => {

@@ -769,5 +769,5 @@ const flashRow = (selector) => {
   row.scrollIntoView({ block: 'center', behavior: 'smooth' });
   setTimeout(() => row.classList.remove('row-flash'), 4000);
 };
-setInterval(() => { if (state.user) loadApp(); }, 15 * 60 * 1000);
+setInterval(() => { if (state.user) loadApp(); }, 10 * 60 * 1000);
 loadApp().catch((error) => { renderAuth(); toast(error.message || 'לא ניתן לפתוח את KinderGuard כרגע.', 'danger'); });
