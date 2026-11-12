@@ -19,6 +19,10 @@ const loginLimiter = rateLimit({
   handler: (_req, res) => res.status(429).json({ message: 'יותר מדי ניסיונות התחברות. המתינו כמה דקות ונסו שוב.' }),
 });
 
+// Per-account lockout lives in the login controller (see userController and
+// models/LoginLockout): 5 consecutive failed logins block the account for a
+// full hour, a successful login resets the count. It is DB-backed so it is
+// shared across instances and survives restarts, unlike a memory limiter.
 router.post('/login', loginLimiter, [body('email').isEmail(), body('password').isLength({ min: 6 }), handleValidation], asyncHandler(loginUser));
 router.post('/register', loginLimiter, [body('name').trim().notEmpty(), body('email').isEmail(), body('password').isLength({ min: 8 }), handleValidation], asyncHandler(registerUser));
 router.get('/me', asyncHandler(protect), asyncHandler(getCurrentUser));

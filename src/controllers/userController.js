@@ -1,8 +1,63 @@
 import User from '../models/User.js';
 import Branch from '../models/Branch.js';
+import LoginLockout from '../models/LoginLockout.js';
 import logger from '../utils/logger.js';
 import { getAdminId } from '../utils/access.js';
 import { issueTokensForUser } from './authController.js';
+
+// Per-account lockout: after LOCKOUT_THRESHOLD consecutive failed logins the
+// account is blocked for a full LOCKOUT_DURATION_MS, even for the correct
+// password. A successful login before the threshold resets the count, and
+// failures older than LOCKOUT_WINDOW_MS no longer count, so old history cannot
+// lock an account later. Known tradeoff: someone who knows an email address
+// can keep that account temporarily locked out; the block is time-boxed.
+const LOCKOUT_THRESHOLD = Number(process.env.LOGIN_LOCKOUT_THRESHOLD) || 5;
+const LOCKOUT_DURATION_MS = Number(process.env.LOGIN_LOCKOUT_DURATION_MS) || 60 * 60 * 1000;
+const LOCKOUT_WINDOW_MS = Number(process.env.LOGIN_LOCKOUT_WINDOW_MS) || 60 * 60 * 1000;
+const LOCKED_MESSAGE = 'החשבון נחסם לשעה בעקבות ניסיונות התחברות כושלים. נסו שוב בעוד כשעה.';
+
+// One atomic aggregation-pipeline update per document: append the failure,
+// prune entries older than the window, and set the lock exactly when the count
+// crosses the threshold. Concurrent failures serialize at the database, so the
+// count can neither skip the threshold nor clobber a parallel failure, and a
+// failure landing while the account is already locked never extends the lock.
+const recordFailedLogin = async (email, now) => {
+  const windowStart = new Date(now.getTime() - LOCKOUT_WINDOW_MS);
+  const lockUntil = new Date(now.getTime() + LOCKOUT_DURATION_MS);
+  await LoginLockout.findOneAndUpdate(
+    { email },
+    [
+      {
+        $set: {
+          failures: {
+            $filter: {
+              input: { $concatArrays: [{ $ifNull: ['$failures', []] }, [now]] },
+              as: 'ts',
+              cond: { $gte: ['$$ts', windowStart] },
+            },
+          },
+        },
+      },
+      {
+        $set: {
+          lockedUntil: {
+            $cond: [
+              {
+                $and: [
+                  { $gte: [{ $size: '$failures' }, LOCKOUT_THRESHOLD] },
+                  { $not: [{ $gt: ['$lockedUntil', now] }] },
+                ],
+              },
+              lockUntil,
+              '$lockedUntil',
+            ],
+          },
+        },
+      },
+    ],
+    { upsert: true }
+  );
+};
 
 export const registerUser = async (req, res) => {
   // Public registration is only for the first account. Later users are added by an Admin.
@@ -44,11 +99,20 @@ export const listManagedUsers = async (req, res) => {
 
 export const loginUser = async (req, res) => {
   const { email, password } = req.body;
-  const user = await User.findOne({ email: String(email).toLowerCase() });
+  const normalizedEmail = String(email).toLowerCase().trim();
+  const now = new Date();
+  const lock = await LoginLockout.findOne({ email: normalizedEmail }).lean();
+  if (lock?.lockedUntil && lock.lockedUntil > now) {
+    logger.warn(`Blocked login attempt on locked account: ${normalizedEmail}`);
+    return res.status(429).json({ message: LOCKED_MESSAGE });
+  }
+  const user = await User.findOne({ email: normalizedEmail });
   if (!user || !(await user.comparePassword(password))) {
-    logger.warn(`Failed login for email: ${email}`);
+    logger.warn(`Failed login for email: ${normalizedEmail}`);
+    await recordFailedLogin(normalizedEmail, now);
     return res.status(401).json({ message: 'כתובת דוא״ל או סיסמה שגויות' });
   }
+  if (lock) await LoginLockout.updateOne({ email: normalizedEmail }, { $set: { failures: [], lockedUntil: null } });
   res.json({ id: user._id, name: user.name, email: user.email, role: user.role, token: await issueTokensForUser(res, user) });
 };
 
