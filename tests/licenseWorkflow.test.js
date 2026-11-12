@@ -110,6 +110,81 @@ describe('Branch permit workflow', () => {
     await License.deleteOne({ _id: license._id });
   }, 20000);
 
+
+  it('rejects non-document uploads server-side before storage', async () => {
+    const issueDate = new Date().toISOString().slice(0, 10);
+    const response = await request(app)
+      .post('/api/licenses')
+      .set('Authorization', `Bearer ${token}`)
+      .field('branchId', branchId)
+      .field('licenseTypeId', licenseTypeId)
+      .field('issueDate', issueDate)
+      .field('expiryDate', issueDate)
+      .attach('file', Buffer.from('<script>alert(1)</script>'), { filename: 'evil.html', contentType: 'text/html' })
+      .expect(400);
+    expect(response.body.message).toContain('PDF');
+  });
+
+  it('rejects a spoofed upload whose bytes do not match the declared type', async () => {
+    const issueDate = new Date().toISOString().slice(0, 10);
+    const response = await request(app)
+      .post('/api/licenses')
+      .set('Authorization', `Bearer ${token}`)
+      .field('branchId', branchId)
+      .field('licenseTypeId', licenseTypeId)
+      .field('issueDate', issueDate)
+      .field('expiryDate', issueDate)
+      .attach('file', Buffer.from('<script>alert(1)</script>'), { filename: 'pretend.png', contentType: 'image/png' })
+      .expect(400);
+    expect(response.body.message).toContain('אינו תואם');
+  });
+
+  it('accepts a genuine PDF upload and stores it privately', async () => {
+    const issueDate = new Date().toISOString().slice(0, 10);
+    const pdf = Buffer.concat([Buffer.from('%PDF-1.4 fake-body-for-test'), Buffer.alloc(16, 0)]);
+    const response = await request(app)
+      .post('/api/licenses')
+      .set('Authorization', `Bearer ${token}`)
+      .field('branchId', branchId)
+      .field('licenseTypeId', licenseTypeId)
+      .field('issueDate', issueDate)
+      .field('expiryDate', issueDate)
+      .attach('file', pdf, { filename: 'permit.pdf', contentType: 'application/pdf' })
+      .expect(201);
+    expect(response.body.fileUrl || '').not.toBe('');
+  });
+
+  it('serves a stored non-document object as an opaque attachment, never inline', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const branch = await request(app).post('/api/branches').set('Authorization', `Bearer ${token}`).send({ name: 'Odd File Branch' }).expect(201);
+    const type = await request(app).post('/api/license-types').set('Authorization', `Bearer ${token}`).send({ name: 'אישור חריג', branchId: null }).expect(201);
+    const license = await License.create({
+      branchId: branch.body._id, licenseTypeId: type.body._id, issueDate: today, expiryDate: today,
+      fileUrl: 'licenses/999-page.html', fileName: 'page.html',
+      status: 'Valid', createdBy: adminId,
+    });
+    s3Mock.on(GetObjectCommand).resolves({
+      Body: Readable.from(['<script>alert(1)</script>']),
+      ContentType: 'text/html',
+      ContentLength: 25,
+    });
+    const binaryParser = (res, callback) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => callback(null, Buffer.concat(chunks)));
+    };
+    const response = await request(app)
+      .get(`/api/licenses/${license._id}/file`)
+      .set('Authorization', `Bearer ${token}`)
+      .buffer(true)
+      .parse(binaryParser)
+      .expect(200);
+    expect(response.headers['content-type']).toContain('application/octet-stream');
+    expect(response.headers['content-disposition']).toContain('attachment');
+    expect(response.headers['x-content-type-options']).toBe('nosniff');
+    await License.deleteOne({ _id: license._id });
+  }, 20000);
+
   it('supports branch-specific permit types and rejects types from another branch', async () => {
     const other = await request(app).post('/api/branches').set('Authorization', `Bearer ${token}`).send({ name: 'Other Branch' }).expect(201);
     const type = await request(app).post('/api/license-types').set('Authorization', `Bearer ${token}`).send({ name: 'סוג ייחודי', branchId: other.body._id }).expect(201);

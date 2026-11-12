@@ -4,6 +4,7 @@ import LicenseType from '../models/LicenseType.js';
 import Notification from '../models/Notification.js';
 import { getAdminId, hasBranchAccess } from '../utils/access.js';
 import { uploadFileToS3, downloadFileFromS3 } from '../services/s3Service.js';
+import { ALLOWED_UPLOAD_MIME, matchesDeclaredType } from '../utils/uploadTypes.js';
 
 export const statusForExpiry = (expiryDate) => {
   const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -25,6 +26,14 @@ export const createLicense = async (req, res) => {
 
   let fileKey = '';
   if (req.file) {
+    // The declared mimetype passed the route whitelist; now prove the bytes
+    // match it, so a renamed script can't ride into storage as a "document".
+    if (!matchesDeclaredType(req.file.buffer, req.file.mimetype)) {
+      const error = new Error('תוכן הקובץ אינו תואם את סוג הקובץ. העלו PDF או תמונה תקינים.');
+      error.statusCode = 400;
+      error.publicMessage = error.message;
+      throw error;
+    }
     try {
       fileKey = await uploadFileToS3(req.file.buffer, req.file.originalname, req.file.mimetype);
     } catch (error) {
@@ -100,8 +109,14 @@ export const downloadLicenseFile = async (req, res) => {
 
   const fileName = license.fileName || 'license-file';
   const asciiFallback = fileName.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_');
-  res.setHeader('Content-Type', s3Response.ContentType || 'application/octet-stream');
-  res.setHeader('Content-Disposition', `inline; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+  // Only known document/image types render inline. Anything else (a legacy or
+  // manually planted object) downloads as an opaque attachment, never as an
+  // active page on our origin.
+  const storedType = s3Response.ContentType || 'application/octet-stream';
+  const safeInline = ALLOWED_UPLOAD_MIME.has(storedType);
+  res.setHeader('Content-Type', safeInline ? storedType : 'application/octet-stream');
+  res.setHeader('Content-Disposition', `${safeInline ? 'inline' : 'attachment'}; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   if (s3Response.ContentLength) res.setHeader('Content-Length', String(s3Response.ContentLength));
   s3Response.Body.pipe(res);
 };

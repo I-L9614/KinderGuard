@@ -4,6 +4,8 @@ import User from '../models/User.js';
 import jwt from 'jsonwebtoken';
 import logger from '../utils/logger.js';
 
+export const hashToken = (token) => crypto.createHash('sha256').update(String(token)).digest('hex');
+
 const REFRESH_TOKEN_TTL_MS = parseInt(process.env.REFRESH_TOKEN_TTL_MS || String(30 * 24 * 60 * 60 * 1000), 10);
 const REFRESH_TOKEN_LIMIT = parseInt(process.env.REFRESH_TOKEN_LIMIT || '5', 10);
 
@@ -13,12 +15,15 @@ const createRefreshToken = async (userId, opts = {}) => {
   const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
   const doc = await RefreshToken.create({
     jti,
-    token,
+    tokenHash: hashToken(token),
     user: userId,
     ip: opts.ip,
     userAgent: opts.userAgent,
     expiresAt,
   });
+  // The raw token is returned to the caller exactly once (cookie/replacement
+  // chain) and is never persisted - only its hash is stored.
+  doc.token = token;
 
   // enforce limit of active tokens per user
   const activeTokens = await RefreshToken.find({ user: userId, revoked: false }).sort({ createdAt: -1 });
@@ -40,7 +45,10 @@ export const refreshToken = async (req, res) => {
   if (!incoming) {
     return res.status(401).json({ message: 'פג תוקף החיבור. התחברו שוב.' });
   }
-  const tokenDoc = await RefreshToken.findOne({ token: incoming });
+  // Hash lookup first; the plaintext fallback keeps sessions issued before
+  // the hashing change valid until they age out, so deploys force no re-login.
+  const tokenDoc = await RefreshToken.findOne({ tokenHash: hashToken(incoming) })
+    || await RefreshToken.findOne({ token: incoming });
   if (!tokenDoc || tokenDoc.revoked || tokenDoc.expiresAt < new Date()) {
     return res.status(401).json({ message: 'פג תוקף החיבור. התחברו שוב.' });
   }
@@ -54,7 +62,7 @@ export const refreshToken = async (req, res) => {
   // revoke current and record replacement
   tokenDoc.revoked = true;
   const newRefresh = await createRefreshToken(user._id, { ip: req.ip, userAgent: req.get('User-Agent') });
-  tokenDoc.replacedByToken = newRefresh.token;
+  tokenDoc.replacedByToken = newRefresh.tokenHash;
   await tokenDoc.save();
 
   // set rotated cookie
@@ -74,7 +82,8 @@ export const logout = async (req, res) => {
   if (!incoming) {
     return res.status(204).send();
   }
-  const doc = await RefreshToken.findOne({ token: incoming });
+  const doc = await RefreshToken.findOne({ tokenHash: hashToken(incoming) })
+    || await RefreshToken.findOne({ token: incoming });
   if (doc) {
     doc.revoked = true;
     if (req.user) {
