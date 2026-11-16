@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 const inDays = (n) => new Date(Date.now() + n * 86400000).toISOString();
 
 const rentSummary = {
-  authorities: [{ _id: 'auth1', name: 'מועצה אזורית בדיקה' }],
+  authorities: [{ _id: 'auth1', name: 'מועצה אזורית בדיקה' }, { _id: 'auth2', name: 'מקבל תשלום <פרטי>', type: 'private' }],
   agreements: [{ _id: 'ag1', branchId: { _id: 'b1', name: 'גן הדוגמה' }, authorityId: { _id: 'auth1', name: 'מועצה אזורית בדיקה' }, status: 'Active', frequency: 'monthly', paymentMethod: 'cheque', monthlyAmount: 5000, annualAmount: 60000 }],
   payments: [
     { _id: 'p1', agreementId: 'ag1', branchName: 'גן הדוגמה', authorityName: 'מועצה אזורית בדיקה', method: 'cheque', amount: 5000, dueDate: inDays(10), status: 'Pending' },
@@ -114,16 +114,44 @@ describe('rent summary cards as shortcuts', () => {
   });
 
   it('annual-total card clears the authority filter and scrolls to the authorities', async () => {
-    document.querySelector('.rent-filter[data-authority="auth1"]').click();
+    const filter = document.getElementById('rentAuthorityFilter');
+    filter.value = 'auth1';
+    filter.dispatchEvent(new Event('change', { bubbles: true }));
     await flush();
-    // active filter chip is highlighted with the plain-hex background
-    expect(document.querySelector('.rent-filter[data-authority="auth1"]').style.backgroundColor).toBe('rgb(234, 245, 242)');
-    expect(document.querySelector('.rent-filter[data-authority=""]').style.backgroundColor).toBe('');
+    expect(document.getElementById('rentAuthorityFilter').value).toBe('auth1');
     document.getElementById('rentAnnualCard').click();
     await flush();
-    // filter cleared: "all authorities" is highlighted again and we scrolled there
-    expect(document.querySelector('.rent-filter[data-authority=""]').style.backgroundColor).toBe('rgb(234, 245, 242)');
+    expect(document.getElementById('rentAuthorityFilter').value).toBe('');
     expect(document.getElementById('rentAuthoritiesTop').scrollIntoView).toHaveBeenCalled();
+  });
+
+  it('uses one labelled picker, defaults to all, and preserves private labels safely', () => {
+    const picker = document.getElementById('rentAuthorityFilter');
+    expect(picker.tagName).toBe('SELECT');
+    expect(document.querySelector('label[for="rentAuthorityFilter"]').textContent).toBe('סינון לפי רשות');
+    expect(picker.value).toBe('');
+    expect([...picker.options].map((option) => option.text)).toEqual(['כל הרשויות', 'מועצה אזורית בדיקה', 'מקבל תשלום <פרטי> (פרטי)']);
+    expect(document.querySelectorAll('.rent-filter')).toHaveLength(0);
+    expect(picker.querySelector('פרטי')).toBeNull();
+  });
+
+  it('filters only the authority panels, restores all, and performs no data writes', async () => {
+    const select = async (value) => {
+      const picker = document.getElementById('rentAuthorityFilter');
+      picker.value = value;
+      picker.dispatchEvent(new Event('change', { bubbles: true }));
+      await flush();
+    };
+    const panelHeadings = () => [...document.querySelectorAll('#rentAuthoritiesTop ~ .panel > .section-heading h3')].map((h) => h.textContent);
+    global.fetch.mockClear();
+    await select('auth2');
+    expect(panelHeadings()).toContain('מקבל תשלום <פרטי> (פרטי)');
+    expect(panelHeadings()).not.toContain('מועצה אזורית בדיקה');
+    expect(document.activeElement.id).toBe('rentAuthorityFilter');
+    await select('');
+    expect(panelHeadings()).toContain('מועצה אזורית בדיקה');
+    expect(panelHeadings()).toContain('מקבל תשלום <פרטי> (פרטי)');
+    expect(global.fetch.mock.calls.every(([, options]) => !options?.method || options.method === 'GET')).toBe(true);
   });
 
   it('active-reminders card navigates to the alerts inbox', async () => {
