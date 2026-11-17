@@ -88,6 +88,16 @@ export async function captureUiEvidence({ exe, outDir, cdpPort, fail, ok }) {
     });
     ok('seeded council payer, private payer and contact-full branch through the real API');
 
+    // Approval-card evidence stays entirely in this throwaway MongoDB.
+    const type = await post('/api/license-types', { name: 'כיבוי אש שנתי' });
+    const approval = await post('/api/licenses', { branchId: branch._id, licenseTypeId: type._id, issueDate: '2026-05-11', expiryDate: '2031-05-11' });
+    // A display-only document marker exercises the button without S3 or a file.
+    const { default: mongoose } = await import('mongoose');
+    const evidenceDb = await mongoose.createConnection(mongo.getUri()).asPromise();
+    await evidenceDb.collection('licenses').updateOne({ _id: new mongoose.Types.ObjectId(approval._id) }, { $set: { fileUrl: 'isolated-ui-evidence.pdf', fileName: 'מסמך בדיקה מקומי בלבד.pdf' } });
+    await evidenceDb.close();
+
+
     // Real window over CDP.
     let page;
     for (let i = 0; i < 45 && !page; i++) {
@@ -145,6 +155,23 @@ export async function captureUiEvidence({ exe, outDir, cdpPort, fail, ok }) {
     if (!panelSeen) fail('branch detail contacts+payer panel did not render');
     captureScreen('branch-detail-contacts.png');
     ok('branch detail shows the contacts+payer panel (branch-detail-contacts.png)');
+
+    const approvalCheck = await evalJs(`
+      const card = document.querySelector('#licenseList .approval-card');
+      card?.scrollIntoView({ block: 'center' });
+      return !!card?.querySelector('[data-open-file]') && !!card?.querySelector('details [data-history]') && !!card?.querySelector('details [data-delete-license-file]');`);
+    if (!approvalCheck) fail('packaged approval card is missing its primary or secondary actions');
+    captureScreen('approval-cards-desktop.png');
+    await cdpSend('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await evalJs(`document.querySelector('#licenseList .approval-card').scrollIntoView({ block: 'center' }); document.querySelector('.approval-menu summary').click(); return true;`);
+    const noOverflow = await evalJs('return document.documentElement.scrollWidth <= innerWidth');
+    if (!noOverflow) fail('packaged approval layout overflows the mobile viewport');
+    const mobileShot = await cdpSend('Page.captureScreenshot', { format: 'png' });
+    fs.writeFileSync(path.join(outDir, 'approval-cards-mobile.png'), Buffer.from(mobileShot.result.data, 'base64'));
+    await evalJs('document.querySelector(".approval-menu").open = false; return true;');
+    await cdpSend('Emulation.clearDeviceMetricsOverride');
+    ok('packaged approval cards and mobile overflow/menu evidence verified');
+
 
     // Branch edit form: contact fields and the payer dropdown with (פרטי).
     await evalJs('document.getElementById("editBranch").click(); return true;');

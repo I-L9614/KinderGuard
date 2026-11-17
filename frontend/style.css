@@ -106,3 +106,43 @@
 .rent-authority-filter label{font-size:12px;color:#587076;font-weight:600}
 .rent-authority-filter select{width:100%;min-width:0;min-height:46px;padding:11px 12px;border:1px solid var(--teal);border-radius:11px;background:#eaf5f2;color:var(--ink);font-weight:600;cursor:pointer}
 .rent-authority-filter select:focus-visible{outline:3px solid #52aaa1;outline-offset:2px}
+
+/* Approval cards: scoped to the branch list, never shared rent/payment rows. */
+#licenseList{display:grid;gap:12px;border:0;margin-top:16px}
+#licenseList .approval-card{display:block;position:relative;padding:16px 18px;border:1px solid var(--line);border-radius:16px;background:#fff;box-shadow:0 2px 5px #18313a08}
+.approval-heading{display:flex;align-items:center;gap:12px;min-width:0}
+.approval-icon{display:grid;place-items:center;flex:0 0 36px;width:36px;height:36px;border-radius:11px;background:#e7f4ef;color:var(--teal)}
+.approval-icon svg{width:21px;height:21px}
+.approval-name{min-width:0;flex:1;font-size:15px;line-height:1.45;overflow-wrap:anywhere}
+.approval-dates{display:flex;align-items:center;gap:7px;margin-top:10px;color:#657c7c;font-size:13px;line-height:1.6}
+.approval-dates svg{width:16px;height:16px;flex-shrink:0;color:#8ba7a1}
+.approval-dates bdi{white-space:nowrap}
+.approval-footer{display:flex;align-items:center;gap:12px;border-top:1px solid #edf2ef;padding-top:10px;margin-top:10px;min-width:0}
+.approval-open{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:9px 14px;box-shadow:none;font-size:13px;white-space:nowrap}
+.approval-open svg{width:17px;height:17px}
+.approval-filename{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#8a9f9d;font-size:11px;text-align:end;unicode-bidi:plaintext}
+.approval-no-file{flex:1;color:var(--muted);font-size:12px}
+.approval-menu{position:relative;margin-inline-start:auto;flex:0 0 36px;align-self:stretch}
+.approval-menu summary{display:grid;place-items:center;list-style:none;min-width:36px;min-height:38px;padding:0;border-radius:9px;color:#728c88;font-size:26px;line-height:1;font-weight:400}
+.approval-menu summary::-webkit-details-marker{display:none}
+.approval-menu summary:hover,.approval-menu[open] summary{background:#edf5f1}
+.approval-menu summary:focus-visible,.approval-card button:focus-visible{outline:3px solid #50b4a9;outline-offset:3px}
+.approval-menu[open]{z-index:3}
+.approval-menu-items{position:absolute;inset-inline-end:0;top:calc(100% + 5px);min-width:170px;padding:8px;background:#fff;border:1px solid var(--line);border-radius:13px;box-shadow:0 10px 30px #18313a24;z-index:4}
+.approval-menu-items button{display:flex;align-items:center;gap:10px;width:100%;padding:12px;text-align:start;font-size:13px;border-radius:8px;font-weight:500}
+.approval-menu-items button:hover{background:#f4f8f6;transform:none}
+.approval-menu-items svg{width:17px;height:17px;flex-shrink:0}
+@media(max-width:600px){
+  #licenseList .approval-card{padding:14px;border-radius:16px;gap:0}
+  .approval-heading{gap:10px}
+  .approval-name{font-size:15px}
+  .approval-heading .status-pill{font-size:11px;padding:5px 9px;flex-shrink:0}
+  .approval-dates{font-size:12px}
+  .approval-footer{gap:8px}
+  .approval-open{min-height:42px;padding:9px 12px}
+  .approval-menu summary{min-height:42px;min-width:40px}
+}
+@media(max-width:360px){.approval-footer{flex-wrap:wrap}.approval-filename{max-width:90px}.approval-heading{gap:7px}.approval-icon{flex-basis:30px;width:30px;height:32px}.approval-name{font-size:14px}}
+#licenseList{grid-template-columns:minmax(0,1fr);min-width:0}
+#licenseList .approval-card{min-width:0}
+#licenseList .approval-menu-items .text-button{padding:12px;min-height:44px}
