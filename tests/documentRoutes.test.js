@@ -163,3 +163,72 @@ describe('Rent agreement documents', () => {
       .set(auth()).expect(404);
   }, 20000);
 });
+
+describe('Document permission isolation', () => {
+  let managerToken;
+  let ownLicenseId;
+  let otherLicenseId;
+
+  const managerAuth = () => ({ Authorization: `Bearer ${managerToken}` });
+
+  beforeAll(async () => {
+    const otherBranchId = (await request(app).post('/api/branches').set(auth()).send({ name: 'Docs Other Branch' }).expect(201)).body._id;
+    const ownType = await freshLicenseType();
+    const otherType = await freshLicenseType();
+    ownLicenseId = (await License.create({
+      branchId, licenseTypeId: ownType, issueDate: today(), expiryDate: today(),
+      fileUrl: 'licenses/own.pdf', fileName: 'own.pdf', status: 'Valid', createdBy: adminId,
+    }))._id;
+    otherLicenseId = (await License.create({
+      branchId: otherBranchId, licenseTypeId: otherType, issueDate: today(), expiryDate: today(),
+      fileUrl: 'licenses/other.pdf', fileName: 'other.pdf', status: 'Valid', createdBy: adminId,
+    }))._id;
+    const email = `docs-mgr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`;
+    await request(app).post('/api/users').set(auth()).send({ name: 'Docs Manager', email, password: 'Password123', accessibleBranches: [branchId] }).expect(201);
+    managerToken = (await request(app).post('/api/users/login').send({ email, password: 'Password123' }).expect(200)).body.token;
+  }, 600000);
+
+  it('lets a branch user download a document from his assigned branch', async () => {
+    s3Mock.on(GetObjectCommand).resolves({
+      Body: Readable.from(['own-bytes']), ContentType: 'application/pdf', ContentLength: 9,
+    });
+    const binaryParser = (res, callback) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => callback(null, Buffer.concat(chunks)));
+    };
+    const download = await request(app)
+      .get(`/api/licenses/${ownLicenseId}/file`).set(managerAuth()).buffer(true).parse(binaryParser).expect(200);
+    expect(download.body.toString()).toBe('own-bytes');
+  }, 20000);
+
+  it('denies a branch user a document download from another branch without touching storage', async () => {
+    await request(app).get(`/api/licenses/${otherLicenseId}/file`).set(managerAuth()).expect(404);
+    expect(s3Mock.calls().filter((call) => call.args[0] instanceof GetObjectCommand)).toHaveLength(0);
+  }, 20000);
+
+  it('denies a branch user a document delete from another branch without touching storage or the record', async () => {
+    await request(app).delete(`/api/licenses/${otherLicenseId}/file`).set(managerAuth()).expect(404);
+    expect(deleteCalls()).toHaveLength(0);
+    const after = await License.findById(otherLicenseId);
+    expect(after.fileUrl).toBe('licenses/other.pdf');
+  }, 20000);
+
+  it('denies branch users every rent route, including agreement documents', async () => {
+    const authority = await request(app).post('/api/rent/authorities').set(auth()).send({ name: 'רשות הרשאות' }).expect(201);
+    const agreement = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId: authority.body._id, monthlyAmount: 1000, frequency: 'monthly',
+      paymentMethod: 'cheque', firstDueDate: new Date(Date.now() + 5 * 86400000),
+    }).expect(201);
+    const agreementId = agreement.body._id;
+    await request(app).get('/api/rent/summary').set(managerAuth()).expect(403);
+    await request(app).get(`/api/rent/agreements/${agreementId}/documents/${new mongoose.Types.ObjectId()}`).set(managerAuth()).expect(403);
+    await request(app)
+      .post(`/api/rent/agreements/${agreementId}/documents`).set(managerAuth())
+      .attach('file', fakePdf(), { filename: 'contract.pdf', contentType: 'application/pdf' })
+      .expect(403);
+    await request(app)
+      .delete(`/api/rent/agreements/${agreementId}/documents/${new mongoose.Types.ObjectId()}`).set(managerAuth()).expect(403);
+    expect(s3Mock.calls().filter((call) => call.args[0] instanceof PutObjectCommand)).toHaveLength(0);
+  }, 20000);
+});
