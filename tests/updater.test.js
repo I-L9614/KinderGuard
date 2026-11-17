@@ -97,8 +97,11 @@ describe('update controller', () => {
 
     autoUpdater.emit('update-downloaded', { version: '0.3.0' });
     expect(controller.install()).toBe(true);
-    // isSilent=false lets the installer close the app; isForceRunAfter reopens it.
-    expect(autoUpdater.quitAndInstall).toHaveBeenCalledWith(false, true);
+    // Silent install: with the assisted (oneClick:false) NSIS installer the
+    // install section honors isForceRunAfter only when silent, so a visible
+    // update installer could leave the app closed after the update. Lock the
+    // (true, true) arguments so the app always reopens after an update.
+    expect(autoUpdater.quitAndInstall).toHaveBeenCalledWith(true, true);
   });
 
   it('surfaces check and download failures as an error state', async () => {

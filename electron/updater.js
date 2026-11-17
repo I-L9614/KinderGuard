@@ -70,11 +70,15 @@ export const createUpdateController = ({ autoUpdater = null, isPackaged = false,
   };
 
   // quitAndInstall closes the app itself, runs the installer and reopens the
-  // new version - no manual quit. isForceRunAfter makes the new version start
-  // again right after the installer finishes.
+  // new version - no manual quit. isSilent=true is deliberate: with our
+  // assisted NSIS installer (oneClick:false), the install section only honors
+  // isForceRunAfter when the install is silent (electron-builder's
+  // installSection.nsh: `${andIf} ${Silent}`) - a non-silent update relied on
+  // the finish-page "Run" checkbox, and the app stayed closed for users who
+  // missed it. Silent update installs always reopen the app.
   const install = () => {
     if (state.status !== 'downloaded' || !autoUpdater) return false;
-    autoUpdater.quitAndInstall(false, true);
+    autoUpdater.quitAndInstall(true, true);
     return true;
   };
 
