@@ -1,4 +1,5 @@
 import { createUpdateGuard } from './updateGuard.js';
+import { parseTypePeriod, addPeriod } from './expiryAutofill.js';
 import { SEEN_KEY, SESSION_KEY, planNativeToasts, resolveAlertTarget, alertToastPayload, summaryToastPayload, testToastPayloads } from './nativeNotify.js';
 
 const app = document.getElementById('app');
@@ -292,12 +293,32 @@ const licenseTypeForm = (branch = null) => {
 const licenseForm = (selectedBranch = null, availableTypes = state.types) => {
   const branchOptions = selectedBranch ? `<option value="${selectedBranch._id}">${esc(selectedBranch.name)}</option>` : state.branches.map((b) => `<option value="${b._id}">${esc(b.name)}</option>`).join('');
   const initialTypes = selectedBranch ? availableTypes : availableTypes.filter((t) => !t.branchId);
-  const m = modal('העלאת אישור שהתקבל', `<form id="licenseForm" class="form-grid"><label>סניף<select name="branchId" required>${branchOptions}</select></label><label>סוג אישור<select name="licenseTypeId" required>${initialTypes.map((t) => `<option value="${t._id}">${esc(t.name)}</option>`).join('')}</select></label><div class="two-col"><label>תאריך תחילת תוקף<input name="issueDate" type="date" required></label><label>תאריך פקיעה<input name="expiryDate" type="date" required></label></div><label class="file-field">מסמך (PDF או תמונה)<input name="file" type="file" accept=".pdf,image/*"><small>עד 15MB. בהעלאת חידוש, האישור הקודם יישמר בהיסטוריה.</small></label><label class="check-field"><input type="checkbox" name="deleteOldFile" value="true"> מחק גם את המסמך של האישור המוחלף, אם קיים (ללא סימון הוא נשמר בהיסטוריה)</label><button class="primary" ${initialTypes.length ? '' : 'disabled'}>שמירת אישור</button>${initialTypes.length ? '' : '<p class="inline-hint">קודם הגדירו סוג אישור לסניף הזה.</p>'}</form>`);
+  const m = modal('העלאת אישור שהתקבל', `<form id="licenseForm" class="form-grid"><label>סניף<select name="branchId" required>${branchOptions}</select></label><label>סוג אישור<select name="licenseTypeId" required>${initialTypes.map((t) => `<option value="${t._id}">${esc(t.name)}</option>`).join('')}</select></label><div class="two-col"><label>תאריך תחילת תוקף<input name="issueDate" type="date" required></label><label>תאריך פקיעה<input name="expiryDate" type="date" required></label></div><p class="inline-hint">תאריך הפקיעה ממולא אוטומטית לפי תקופת האישור שבשם הסוג - אפשר לשנות אותו ידנית לפי המסמך.</p><label class="file-field">מסמך (PDF או תמונה)<input name="file" type="file" accept=".pdf,image/*"><small>עד 15MB. בהעלאת חידוש, האישור הקודם יישמר בהיסטוריה.</small></label><label class="check-field"><input type="checkbox" name="deleteOldFile" value="true"> מחק גם את המסמך של האישור המוחלף, אם קיים (ללא סימון הוא נשמר בהיסטוריה)</label><button class="primary" ${initialTypes.length ? '' : 'disabled'}>שמירת אישור</button>${initialTypes.length ? '' : '<p class="inline-hint">קודם הגדירו סוג אישור לסניף הזה.</p>'}</form>`);
+  // Expiry auto-fill from the validity period encoded in the type name
+  // ("5 שנתי" = five years, "שנתי" = one year). A manual edit always wins;
+  // clearing the field re-enables auto-fill. Types without a clear period
+  // leave the field manual - no guessing.
+  const issueInput = m.wrap.querySelector('[name="issueDate"]');
+  const expiryInput = m.wrap.querySelector('[name="expiryDate"]');
+  const typeSelect = m.wrap.querySelector('[name="licenseTypeId"]');
+  const autofillExpiry = () => {
+    if (expiryTouched) return;
+    const period = parseTypePeriod(typeSelect.selectedOptions[0]?.textContent);
+    expiryInput.value = (period && issueInput.value) ? addPeriod(issueInput.value, period) : '';
+  };
+  let expiryTouched = false;
+  expiryInput.addEventListener('input', () => {
+    expiryTouched = expiryInput.value !== '';
+    if (!expiryTouched) autofillExpiry();
+  });
+  issueInput.addEventListener('input', autofillExpiry);
+  typeSelect.addEventListener('change', autofillExpiry);
   if (!selectedBranch) m.wrap.querySelector('[name="branchId"]').onchange = async (event) => {
     let types;
     try { types = await api(`/api/license-types?branchId=${event.target.value}`); } catch (error) { toast(error.message, 'danger'); return; }
     const select = m.wrap.querySelector('[name="licenseTypeId"]'); select.innerHTML = types.map((t) => `<option value="${t._id}">${esc(t.name)}</option>`).join('');
     const submit = m.wrap.querySelector('button.primary'); submit.disabled = !types.length;
+    autofillExpiry();
   };
   if (!selectedBranch && state.branches.length) m.wrap.querySelector('[name="branchId"]').dispatchEvent(new Event('change'));
   m.wrap.querySelector('form').onsubmit = async (e) => { e.preventDefault(); const f = new FormData(e.currentTarget); if (new Date(f.get('expiryDate')) < new Date(f.get('issueDate'))) return toast('תאריך הפקיעה חייב להיות אחרי תאריך ההתחלה', 'warning'); try { await api('/api/licenses', { method: 'POST', body: f }); m.close(); toast('האישור נשמר. אם היה אישור קודם, הוא הועבר להיסטוריה.', 'success'); await loadApp(); if (state.branchId) await renderBranch(); } catch (error) { toast(error.message, 'danger'); } };

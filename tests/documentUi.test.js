@@ -7,7 +7,11 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 const inDays = (n) => new Date(Date.now() + n * 86400000).toISOString();
 
 const branches = [{ _id: 'b1', name: 'גן הדוגמה', address: 'רחוב הבדיקה 1' }];
-const licenseTypes = [{ _id: 't1', name: 'אישור בטיחות', branchId: null, active: true }];
+const licenseTypes = [
+  { _id: 't1', name: 'אישור בטיחות', branchId: null, active: true },
+  { _id: 't2', name: 'כיבוי אש שנתי', branchId: null, active: true },
+  { _id: 't3', name: 'בודק חשמל 5 שנתי', branchId: null, active: true },
+];
 const licenses = [{
   _id: 'l1', branchId: 'b1', licenseTypeId: { _id: 't1', name: 'אישור בטיחות' },
   issueDate: inDays(-100), expiryDate: inDays(265), status: 'Valid',
@@ -119,6 +123,76 @@ describe('license document controls', () => {
     await flush();
     const panel = document.getElementById('historyPanel');
     expect(panel.querySelector('[data-delete-license-file="l1"]')).not.toBeNull();
+  });
+});
+
+describe('license expiry auto-fill', () => {
+  beforeEach(boot);
+
+  const openForm = async () => {
+    await openBranch();
+    document.getElementById('addLicense').click();
+    const form = document.getElementById('licenseForm');
+    return {
+      form,
+      type: form.querySelector('[name="licenseTypeId"]'),
+      issue: form.querySelector('[name="issueDate"]'),
+      expiry: form.querySelector('[name="expiryDate"]'),
+    };
+  };
+  const setValue = (input, value, eventName = 'input') => {
+    input.value = value;
+    input.dispatchEvent(new Event(eventName, { bubbles: true }));
+  };
+  const selectType = (select, value) => {
+    select.value = value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
+  it('fills the expiry from the issue date by the type period (1 year and 5 years)', async () => {
+    const { type, issue, expiry } = await openForm();
+    selectType(type, 't2'); // כיבוי אש שנתי
+    setValue(issue, '2026-11-17');
+    expect(expiry.value).toBe('2027-11-17');
+    selectType(type, 't3'); // בודק חשמל 5 שנתי
+    expect(expiry.value).toBe('2031-11-17');
+  });
+
+  it('keeps a manual expiry edit when the type or issue date changes', async () => {
+    const { type, issue, expiry } = await openForm();
+    selectType(type, 't2');
+    setValue(issue, '2026-11-17');
+    expect(expiry.value).toBe('2027-11-17');
+    setValue(expiry, '2028-05-01'); // user corrects per the actual document
+    selectType(type, 't3');
+    expect(expiry.value).toBe('2028-05-01');
+    setValue(issue, '2026-01-01');
+    expect(expiry.value).toBe('2028-05-01');
+  });
+
+  it('re-enables auto-fill after the user clears the field', async () => {
+    const { type, issue, expiry } = await openForm();
+    selectType(type, 't2');
+    setValue(issue, '2026-11-17');
+    setValue(expiry, '2028-05-01');
+    setValue(expiry, ''); // cleared -> auto-fill resumes
+    expect(expiry.value).toBe('2027-11-17');
+  });
+
+  it('leaves the field empty for a type with no clear period - no guessing', async () => {
+    const { type, issue, expiry } = await openForm();
+    selectType(type, 't1'); // אישור בטיחות - no period in the name
+    setValue(issue, '2026-11-17');
+    expect(expiry.value).toBe('');
+  });
+
+  it('clears an auto-filled value when switching to a period-less type', async () => {
+    const { type, issue, expiry } = await openForm();
+    selectType(type, 't2');
+    setValue(issue, '2026-11-17');
+    expect(expiry.value).toBe('2027-11-17');
+    selectType(type, 't1');
+    expect(expiry.value).toBe('');
   });
 });
 
