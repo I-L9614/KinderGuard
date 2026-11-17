@@ -33,6 +33,18 @@ const rentAgreementSchema = new mongoose.Schema({
   },
   status: { type: String, enum: ['Active', 'Closed'], default: 'Active', index: true },
   closedAt: { type: Date, default: null },
+  // Rent documents (contracts, approvals from the authority, payment
+  // confirmations). Kept fully separate from license/approval documents:
+  // different prefix in storage, different routes, admin-only access.
+  documents: {
+    type: [{
+      key: { type: String, required: true },
+      fileName: { type: String, default: '' },
+      uploadedAt: { type: Date, default: Date.now },
+      uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    }],
+    default: [],
+  },
 }, { timestamps: true });
 
 export default mongoose.model('RentAgreement', rentAgreementSchema);

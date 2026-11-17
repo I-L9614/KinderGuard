@@ -22,12 +22,14 @@ const getS3Client = () => {
 };
 
 // Uploads stay private: no ACL, no public URL. The returned key is stored on the
-// license and files are served only through the authenticated download route.
-export const uploadFileToS3 = async (buffer, fileName, contentType) => {
+// owning record and files are served only through authenticated download routes.
+// The prefix keeps document families separated inside the bucket (licenses vs rent).
+export const uploadFileToS3 = async (buffer, fileName, contentType, prefix = 'licenses') => {
   const { bucket, client } = getS3Client();
 
+  const safePrefix = String(prefix).replace(/[^a-zA-Z0-9_-]/g, '_');
   const safeFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const key = `licenses/${Date.now()}-${safeFileName}`;
+  const key = `${safePrefix}/${Date.now()}-${safeFileName}`;
 
   await client.send(new PutObjectCommand({
     Bucket: bucket,

@@ -3,7 +3,7 @@ import Branch from '../models/Branch.js';
 import LicenseType from '../models/LicenseType.js';
 import Notification from '../models/Notification.js';
 import { getAdminId, hasBranchAccess } from '../utils/access.js';
-import { uploadFileToS3, downloadFileFromS3 } from '../services/s3Service.js';
+import { uploadFileToS3, downloadFileFromS3, deleteFileFromS3 } from '../services/s3Service.js';
 import { ALLOWED_UPLOAD_MIME, matchesDeclaredType } from '../utils/uploadTypes.js';
 
 export const statusForExpiry = (expiryDate) => {
@@ -16,7 +16,7 @@ export const statusForExpiry = (expiryDate) => {
 };
 
 export const createLicense = async (req, res) => {
-  const { branchId, licenseTypeId, issueDate, expiryDate } = req.body;
+  const { branchId, licenseTypeId, issueDate, expiryDate, deleteOldFile } = req.body;
   const branch = await Branch.findById(branchId);
   if (!hasBranchAccess(req.user, branch)) return res.status(branch ? 403 : 404).json({ message: 'אין גישה לסניף שנבחר' });
   if (branch.deleting) return res.status(409).json({ message: 'הסניף בתהליך מחיקה. נסו שוב בעוד רגע.' });
@@ -59,8 +59,41 @@ export const createLicense = async (req, res) => {
   if (previous) {
     await License.updateOne({ _id: previous._id }, { $set: { replacedBy: license._id } });
     await Notification.updateMany({ licenseId: previous._id, status: { $in: ['Open', 'In_Progress'] } }, { status: 'Resolved', resolvedAt: new Date(), resolvedBy: req.user._id });
+    // Deleting the replaced approval's document is an explicit user choice
+    // (deleteOldFile), never automatic: without it the file stays available
+    // from the history view.
+    if (previous.fileUrl && (deleteOldFile === true || deleteOldFile === 'true')) {
+      try {
+        await deleteFileFromS3(previous.fileUrl);
+        await License.updateOne({ _id: previous._id }, { $set: { fileUrl: '', fileName: '' } });
+      } catch (error) {
+        // A storage cleanup failure must not roll back the renewal; the old
+        // file simply stays available and can be deleted later.
+        console.error('Failed to delete replaced license file:', error.message);
+      }
+    }
   }
   res.status(201).json(await license.populate('licenseTypeId', 'name'));
+};
+
+// Removes only the attached document of an existing approval: the approval
+// itself, its dates and its history stay untouched.
+export const deleteLicenseFile = async (req, res) => {
+  const license = await License.findById(req.params.id);
+  const branch = license && await Branch.findById(license.branchId);
+  if (!license || !hasBranchAccess(req.user, branch)) return res.status(404).json({ message: 'האישור לא נמצא' });
+  if (!license.fileUrl) return res.status(404).json({ message: 'לא נמצא קובץ מצורף לאישור זה' });
+  try {
+    await deleteFileFromS3(license.fileUrl);
+  } catch (error) {
+    error.statusCode = 502;
+    error.publicMessage = 'שירות האחסון אינו זמין כרגע. נסו שוב בעוד רגע.';
+    throw error;
+  }
+  license.fileUrl = '';
+  license.fileName = '';
+  await license.save();
+  res.json({ message: 'המסמך נמחק' });
 };
 
 export const getLicenses = async (req, res) => {

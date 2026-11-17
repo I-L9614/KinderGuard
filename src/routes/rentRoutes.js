@@ -5,7 +5,9 @@ import {
   createAgreement, updateAgreement, closeAgreement,
   markPaymentHanded, markPaymentCleared, rentSummary,
   listPaymentGroups, createPaymentGroup, markGroupHanded, markGroupCleared, getPaidReport, editPayment, cancelPaymentGroup, revertPaymentStatus, revertGroupStatus,
+  uploadAgreementDocument, downloadAgreementDocument, deleteAgreementDocument,
 } from '../controllers/rentController.js';
+import { documentUpload } from '../middleware/upload.js';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 
 const router = express.Router();
@@ -18,6 +20,9 @@ router.delete('/authorities/:id', asyncHandler(deleteAuthority));
 router.post('/agreements', asyncHandler(createAgreement));
 router.patch('/agreements/:id', asyncHandler(updateAgreement));
 router.post('/agreements/:id/close', asyncHandler(closeAgreement));
+router.post('/agreements/:id/documents', documentUpload.single('file'), asyncHandler(uploadAgreementDocument));
+router.get('/agreements/:id/documents/:docId', asyncHandler(downloadAgreementDocument));
+router.delete('/agreements/:id/documents/:docId', asyncHandler(deleteAgreementDocument));
 router.get('/payment-groups', asyncHandler(listPaymentGroups));
 router.post('/payment-groups', asyncHandler(createPaymentGroup));
 router.post('/payment-groups/:id/handed', asyncHandler(markGroupHanded));

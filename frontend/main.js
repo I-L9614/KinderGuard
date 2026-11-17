@@ -62,6 +62,12 @@ const playNotificationSound = () => {
   } catch {}
 };
 
+const confirmDeleteLicenseFile = (licenseId, fileName) => {
+  const m = modal('מחיקת מסמך', `<div class="form-grid"><p>למחוק את המסמך <strong>${esc(fileName || '')}</strong>?</p><p class="muted">האישור עצמו, תאריכיו וההיסטוריה נשארים. לא ניתן לשחזר את הקובץ אחרי המחיקה.</p><div class="button-row"><button class="danger" id="confirmDeleteFile">מחיקת המסמך</button><button class="secondary" data-cancel>ביטול</button></div></div>`);
+  m.wrap.querySelector('[data-cancel]').onclick = m.close;
+  m.wrap.querySelector('#confirmDeleteFile').onclick = async () => { try { await api(`/api/licenses/${licenseId}/file`, { method: 'DELETE' }); m.close(); toast('המסמך נמחק', 'success'); await loadApp(); if (state.branchId) await renderBranch(); } catch (error) { toast(error.message, 'danger'); } };
+};
+
 const openLicenseFile = async (licenseId) => {
   try {
     const response = await fetch(`/api/licenses/${licenseId}/file`, { headers: state.token ? { Authorization: `Bearer ${state.token}` } : {} });
@@ -201,12 +207,13 @@ const renderBranch = async () => {
   let types;
   try { types = await api(`/api/license-types?branchId=${branch._id}`); }
   catch (error) { app.innerHTML = `<button class="back-link" id="back">← כל הסניפים</button><section class="panel"><h3>לא ניתן לטעון את פרטי הסניף</h3><p>${esc(error.message)}</p><button class="secondary" id="retryBranch">ניסיון חוזר</button></section>`; document.getElementById('back').onclick = () => { state.branchId = null; renderBranches(); }; document.getElementById('retryBranch').onclick = renderBranch; return; }
-  app.innerHTML = `<button class="back-link" id="back">← כל הסניפים</button><section class="branch-title"><div><div class="eyebrow">פרטי סניף</div><h2>${esc(branch.name)}</h2><p>${esc(branch.address || 'כתובת לא הוגדרה')}</p></div><div class="button-row">${state.user.role === 'Admin' ? '<button class="secondary" id="editBranch">✎ עריכת פרטים</button><button class="secondary" id="addType">＋ סוג אישור</button>' : ''}<button class="primary" id="addLicense">＋ העלאת אישור</button></div></section>${branch.managerName || branch.phone || (branch.emails || []).length || branch.authorityId ? `<section class="panel"><div class="section-heading"><div><h3>אנשי קשר ושיוך</h3></div></div><div class="contact-grid">${branch.managerName ? `<div><span class="muted">מנהלת</span><strong>${esc(branch.managerName)}</strong></div>` : ''}${branch.phone ? `<div><span class="muted">טלפון</span><strong dir="ltr">${esc(branch.phone)}</strong></div>` : ''}${(branch.emails || []).length ? `<div><span class="muted">מיילים</span><strong>${branch.emails.map((em) => esc(em)).join(', ')}</strong></div>` : ''}${branch.authorityId ? `<div><span class="muted">מקבל התשלום (שכירות)</span><strong>${esc(branch.authorityId.name || '')}${branch.authorityId.type === 'private' ? ' · פרטי' : ''}</strong></div>` : ''}</div></section>` : ''}<section class="stats-grid compact"><article class="stat-card"><div><strong>${licenses.length}</strong><small>אישורים פעילים</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Valid').length}</strong><small>בתוקף</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Expiring_Soon').length}</strong><small>לקראת פקיעה</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Expired').length}</strong><small>פגו</small></div></article></section><section class="panel"><div class="section-heading"><div><h3>אישורי הסניף</h3><p>האישור החדש ביותר מכל סוג מוצג כאן</p></div><span class="muted">${licenses.length} פעילים</span></div>${licenses.length ? `<input type="search" class="search-input" id="licenseSearch" placeholder="חיפוש אישור לפי סוג או שם קובץ" aria-label="חיפוש אישור"><div class="license-list" id="licenseList">${licenses.map((license) => `<article class="license-row" data-license-id="${license._id}" data-search="${esc(typeName(license.licenseTypeId) + ' ' + (license.fileName || ''))}"><div class="license-icon ${statusClass(license.status)}">▤</div><div class="license-main"><strong>${esc(typeName(license.licenseTypeId))}</strong><small>תוקף ${date(license.issueDate)} — ${date(license.expiryDate)} ${license.fileName && license.fileUrl ? `· <button class="file-link link-button" data-open-file="${license._id}">${esc(license.fileName)}</button>` : ''}</small></div><span class="status-pill ${statusClass(license.status)}">${statusText(license.status)}</span><button class="text-button" data-history="${license._id}">היסטוריה</button></article>`).join('')}</div><div class="empty-state small" id="noLicenseMatches" hidden><span>▤</span><h3>לא נמצאו אישורים תואמים</h3><p>נסו לשנות את מילות החיפוש.</p></div>` : `<div class="empty-state small"><span>▤</span><h3>אין עדיין אישורים בסניף</h3><p>הגדירו סוג אישור והעלו את המסמך הראשון.</p></div>`}</section><section class="panel"><div class="section-heading"><div><h3>סוגי האישורים לסניף</h3><p>סוגים כלליים וגם סוגים שהוגדרו רק לסניף זה</p></div></div><div class="type-chips">${types.map((t) => `<span class="type-chip">${esc(t.name)}${t.branchId ? '<small>סניף זה</small>' : '<small>כל הסניפים</small>'}</span>`).join('') || '<span class="muted">לא הוגדרו עדיין סוגי אישור</span>'}</div></section><section id="historyPanel"></section>`;
+  app.innerHTML = `<button class="back-link" id="back">← כל הסניפים</button><section class="branch-title"><div><div class="eyebrow">פרטי סניף</div><h2>${esc(branch.name)}</h2><p>${esc(branch.address || 'כתובת לא הוגדרה')}</p></div><div class="button-row">${state.user.role === 'Admin' ? '<button class="secondary" id="editBranch">✎ עריכת פרטים</button><button class="secondary" id="addType">＋ סוג אישור</button>' : ''}<button class="primary" id="addLicense">＋ העלאת אישור</button></div></section>${branch.managerName || branch.phone || (branch.emails || []).length || branch.authorityId ? `<section class="panel"><div class="section-heading"><div><h3>אנשי קשר ושיוך</h3></div></div><div class="contact-grid">${branch.managerName ? `<div><span class="muted">מנהלת</span><strong>${esc(branch.managerName)}</strong></div>` : ''}${branch.phone ? `<div><span class="muted">טלפון</span><strong dir="ltr">${esc(branch.phone)}</strong></div>` : ''}${(branch.emails || []).length ? `<div><span class="muted">מיילים</span><strong>${branch.emails.map((em) => esc(em)).join(', ')}</strong></div>` : ''}${branch.authorityId ? `<div><span class="muted">מקבל התשלום (שכירות)</span><strong>${esc(branch.authorityId.name || '')}${branch.authorityId.type === 'private' ? ' · פרטי' : ''}</strong></div>` : ''}</div></section>` : ''}<section class="stats-grid compact"><article class="stat-card"><div><strong>${licenses.length}</strong><small>אישורים פעילים</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Valid').length}</strong><small>בתוקף</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Expiring_Soon').length}</strong><small>לקראת פקיעה</small></div></article><article class="stat-card"><div><strong>${licenses.filter((l) => l.status === 'Expired').length}</strong><small>פגו</small></div></article></section><section class="panel"><div class="section-heading"><div><h3>אישורי הסניף</h3><p>האישור החדש ביותר מכל סוג מוצג כאן</p></div><span class="muted">${licenses.length} פעילים</span></div>${licenses.length ? `<input type="search" class="search-input" id="licenseSearch" placeholder="חיפוש אישור לפי סוג או שם קובץ" aria-label="חיפוש אישור"><div class="license-list" id="licenseList">${licenses.map((license) => `<article class="license-row" data-license-id="${license._id}" data-search="${esc(typeName(license.licenseTypeId) + ' ' + (license.fileName || ''))}"><div class="license-icon ${statusClass(license.status)}">▤</div><div class="license-main"><strong>${esc(typeName(license.licenseTypeId))}</strong><small>תוקף ${date(license.issueDate)} — ${date(license.expiryDate)} ${license.fileName && license.fileUrl ? `· <button class="file-link link-button" data-open-file="${license._id}">${esc(license.fileName)}</button>` : ''}</small></div><span class="status-pill ${statusClass(license.status)}">${statusText(license.status)}</span>${license.fileUrl ? `<button class="text-button danger-text" data-delete-license-file="${license._id}" data-file-name="${esc(license.fileName || '')}">מחיקת מסמך</button>` : ''}<button class="text-button" data-history="${license._id}">היסטוריה</button></article>`).join('')}</div><div class="empty-state small" id="noLicenseMatches" hidden><span>▤</span><h3>לא נמצאו אישורים תואמים</h3><p>נסו לשנות את מילות החיפוש.</p></div>` : `<div class="empty-state small"><span>▤</span><h3>אין עדיין אישורים בסניף</h3><p>הגדירו סוג אישור והעלו את המסמך הראשון.</p></div>`}</section><section class="panel"><div class="section-heading"><div><h3>סוגי האישורים לסניף</h3><p>סוגים כלליים וגם סוגים שהוגדרו רק לסניף זה</p></div></div><div class="type-chips">${types.map((t) => `<span class="type-chip">${esc(t.name)}${t.branchId ? '<small>סניף זה</small>' : '<small>כל הסניפים</small>'}</span>`).join('') || '<span class="muted">לא הוגדרו עדיין סוגי אישור</span>'}</div></section><section id="historyPanel"></section>`;
   document.getElementById('back').onclick = () => { state.branchId = null; renderBranches(); };
   document.getElementById('addLicense').onclick = () => licenseForm(branch, types);
   document.getElementById('addType')?.addEventListener('click', () => licenseTypeForm(branch));
   document.getElementById('editBranch')?.addEventListener('click', () => branchForm(branch));
   app.querySelectorAll('[data-open-file]').forEach((button) => button.onclick = () => openLicenseFile(button.dataset.openFile));
+  app.querySelectorAll('[data-delete-license-file]').forEach((button) => button.onclick = () => confirmDeleteLicenseFile(button.dataset.deleteLicenseFile, button.dataset.fileName));
   const licenseSearch = document.getElementById('licenseSearch');
   if (licenseSearch) licenseSearch.oninput = () => {
     const query = licenseSearch.value.trim().toLowerCase();
@@ -223,9 +230,10 @@ const renderBranch = async () => {
     let rows;
     try { rows = await api(`/api/licenses/${button.dataset.history}/history`); } catch (error) { toast(error.message, 'danger'); return; }
     const panel = document.getElementById('historyPanel');
-    panel.innerHTML = `<section class="panel"><div class="section-heading"><div><h3>היסטוריית חידושים · ${esc(typeName(rows[0]?.licenseTypeId))}</h3><p>הגרסאות הקודמות נשמרות לעיון</p></div><button class="icon-button" id="closeHistory">×</button></div><div class="history-list">${rows.map((row) => `<div class="history-row"><span class="history-mark">${row.lifecycle === 'Active' ? 'פעיל' : 'הוחלף'}</span><strong>${date(row.issueDate)} — ${date(row.expiryDate)}</strong><span>${row.fileName && row.fileUrl ? `<button class="file-link link-button" data-open-file="${row._id}">${esc(row.fileName)}</button>` : 'ללא קובץ מצורף'}</span><span class="muted">הועלה ${date(row.createdAt)}</span></div>`).join('')}</div></section>`;
+    panel.innerHTML = `<section class="panel"><div class="section-heading"><div><h3>היסטוריית חידושים · ${esc(typeName(rows[0]?.licenseTypeId))}</h3><p>הגרסאות הקודמות נשמרות לעיון</p></div><button class="icon-button" id="closeHistory">×</button></div><div class="history-list">${rows.map((row) => `<div class="history-row"><span class="history-mark">${row.lifecycle === 'Active' ? 'פעיל' : 'הוחלף'}</span><strong>${date(row.issueDate)} — ${date(row.expiryDate)}</strong><span>${row.fileName && row.fileUrl ? `<button class="file-link link-button" data-open-file="${row._id}">${esc(row.fileName)}</button> <button class="text-button danger-text" data-delete-license-file="${row._id}" data-file-name="${esc(row.fileName)}">מחיקת מסמך</button>` : 'ללא קובץ מצורף'}</span><span class="muted">הועלה ${date(row.createdAt)}</span></div>`).join('')}</div></section>`;
     document.getElementById('closeHistory').onclick = () => panel.innerHTML = '';
     panel.querySelectorAll('[data-open-file]').forEach((button) => button.onclick = () => openLicenseFile(button.dataset.openFile));
+    panel.querySelectorAll('[data-delete-license-file]').forEach((button) => button.onclick = () => confirmDeleteLicenseFile(button.dataset.deleteLicenseFile, button.dataset.fileName));
   });
   if (state.highlightLicenseId) {
     flashRow(`[data-license-id="${state.highlightLicenseId}"]`);
@@ -284,7 +292,7 @@ const licenseTypeForm = (branch = null) => {
 const licenseForm = (selectedBranch = null, availableTypes = state.types) => {
   const branchOptions = selectedBranch ? `<option value="${selectedBranch._id}">${esc(selectedBranch.name)}</option>` : state.branches.map((b) => `<option value="${b._id}">${esc(b.name)}</option>`).join('');
   const initialTypes = selectedBranch ? availableTypes : availableTypes.filter((t) => !t.branchId);
-  const m = modal('העלאת אישור שהתקבל', `<form id="licenseForm" class="form-grid"><label>סניף<select name="branchId" required>${branchOptions}</select></label><label>סוג אישור<select name="licenseTypeId" required>${initialTypes.map((t) => `<option value="${t._id}">${esc(t.name)}</option>`).join('')}</select></label><div class="two-col"><label>תאריך תחילת תוקף<input name="issueDate" type="date" required></label><label>תאריך פקיעה<input name="expiryDate" type="date" required></label></div><label class="file-field">מסמך (PDF או תמונה)<input name="file" type="file" accept=".pdf,image/*"><small>עד 15MB. בהעלאת חידוש, האישור הקודם יישמר בהיסטוריה.</small></label><button class="primary" ${initialTypes.length ? '' : 'disabled'}>שמירת אישור</button>${initialTypes.length ? '' : '<p class="inline-hint">קודם הגדירו סוג אישור לסניף הזה.</p>'}</form>`);
+  const m = modal('העלאת אישור שהתקבל', `<form id="licenseForm" class="form-grid"><label>סניף<select name="branchId" required>${branchOptions}</select></label><label>סוג אישור<select name="licenseTypeId" required>${initialTypes.map((t) => `<option value="${t._id}">${esc(t.name)}</option>`).join('')}</select></label><div class="two-col"><label>תאריך תחילת תוקף<input name="issueDate" type="date" required></label><label>תאריך פקיעה<input name="expiryDate" type="date" required></label></div><label class="file-field">מסמך (PDF או תמונה)<input name="file" type="file" accept=".pdf,image/*"><small>עד 15MB. בהעלאת חידוש, האישור הקודם יישמר בהיסטוריה.</small></label><label class="check-field"><input type="checkbox" name="deleteOldFile" value="true"> מחק גם את המסמך של האישור המוחלף, אם קיים (ללא סימון הוא נשמר בהיסטוריה)</label><button class="primary" ${initialTypes.length ? '' : 'disabled'}>שמירת אישור</button>${initialTypes.length ? '' : '<p class="inline-hint">קודם הגדירו סוג אישור לסניף הזה.</p>'}</form>`);
   if (!selectedBranch) m.wrap.querySelector('[name="branchId"]').onchange = async (event) => {
     let types;
     try { types = await api(`/api/license-types?branchId=${event.target.value}`); } catch (error) { toast(error.message, 'danger'); return; }
@@ -378,6 +386,44 @@ const rentFrequencyText = (value) => ({ monthly: 'חודשי', quarterly: 'רב�
 const rentMethodText = (value) => ({ cheque: "צ'ק", transfer: 'העברה בנקאית' }[value] || value);
 const rentStatusPill = (status) => ({ Pending: ['neutral', 'ממתין'], Handed: ['warning', "צ'ק נמסר · טרם נפרע"], Cleared: ['good', 'נפרע'], Cancelled: ['neutral', 'בוטל'] }[status] || ['neutral', status]);
 
+const openRentDoc = async (agreementId, docId) => {
+  try {
+    const response = await fetch(`/api/rent/agreements/${agreementId}/documents/${docId}`, { headers: state.token ? { Authorization: `Bearer ${state.token}` } : {} });
+    if (!response.ok) {
+      let message = 'לא ניתן לפתוח את הקובץ. נסו שוב.';
+      try { message = (await response.json()).message || message; } catch {}
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank', 'noopener');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (error) { toast(error.message, 'danger'); }
+};
+
+const confirmDeleteRentDoc = (agreementId, docId, fileName) => {
+  const m = modal('מחיקת מסמך שכירות', `<div class="form-grid"><p>למחוק את המסמך <strong>${esc(fileName || '')}</strong>?</p><p class="muted">הסכם השכירות והתשלומים נשארים. לא ניתן לשחזר את הקובץ אחרי המחיקה.</p><div class="button-row"><button class="danger" id="confirmDeleteRentDoc">מחיקת המסמך</button><button class="secondary" data-cancel>ביטול</button></div></div>`);
+  m.wrap.querySelector('[data-cancel]').onclick = m.close;
+  m.wrap.querySelector('#confirmDeleteRentDoc').onclick = async () => { try { await api(`/api/rent/agreements/${agreementId}/documents/${docId}`, { method: 'DELETE' }); m.close(); toast('המסמך נמחק', 'success'); await renderRent(); } catch (error) { toast(error.message, 'danger'); } };
+};
+
+// Rent documents live in their own modal, fully separate from license
+// documents: different routes, different storage prefix, admin-only screen.
+const rentDocsModal = (agreement) => {
+  const docs = agreement.documents || [];
+  const m = modal(`מסמכי שכירות · ${esc(agreement.branchId?.name || 'סניף')}`, `<div class="form-grid">
+    ${docs.length ? `<div class="history-list">${docs.map((doc) => `<div class="history-row"><span class="history-mark">מסמך</span><strong><button class="file-link link-button" data-rent-open-doc="${doc._id}">${esc(doc.fileName || 'מסמך')}</button></strong><span class="muted">הועלה ${date(doc.uploadedAt)}</span><button class="text-button danger-text" data-rent-del-doc="${doc._id}" data-file-name="${esc(doc.fileName || '')}">מחיקה</button></div>`).join('')}</div>` : '<p class="muted">אין עדיין מסמכים להסכם זה.</p>'}
+    <form id="rentDocForm" class="form-grid"><label class="file-field">הוספת מסמך (PDF או תמונה)<input name="file" type="file" accept=".pdf,image/*" required><small>עד 15MB. מסמכי שכירות נשמרים בנפרד ממסמכי האישורים.</small></label><button class="primary">העלאת מסמך</button></form>
+  </div>`);
+  m.wrap.querySelectorAll('[data-rent-open-doc]').forEach((button) => button.onclick = () => openRentDoc(agreement._id, button.dataset.rentOpenDoc));
+  m.wrap.querySelectorAll('[data-rent-del-doc]').forEach((button) => button.onclick = () => confirmDeleteRentDoc(agreement._id, button.dataset.rentDelDoc, button.dataset.fileName));
+  m.wrap.querySelector('#rentDocForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.currentTarget);
+    try { await api(`/api/rent/agreements/${agreement._id}/documents`, { method: 'POST', body: f }); m.close(); toast('המסמך הועלה', 'success'); await renderRent(); } catch (error) { toast(error.message, 'danger'); }
+  };
+};
+
 const renderRent = async () => {
   let data;
   try { data = await api('/api/rent/summary'); }
@@ -409,6 +455,7 @@ const renderRent = async () => {
       <span class="status-pill ${pillClass}">${pillText}</span>
       ${next && agreement.paymentMethod === 'cheque' && next.status === 'Pending' ? `<button class="text-button" data-rent-handed="${next._id}">סמן כנמסר</button>` : ''}
       ${next ? `<button class="text-button" data-rent-cleared="${next._id}">סמן כנפרע</button>` : ''}
+      <button class="text-button" data-rent-docs="${agreement._id}">מסמכים (${agreement.documents?.length || 0})</button>
       <button class="text-button" data-rent-history="${agreement._id}">היסטוריה</button>
       ${agreement.paymentMethod === 'cheque' ? `<button class="text-button" data-rent-series="${agreement._id}">סדרת צ'קים</button>` : ''}
       <button class="text-button danger-text" data-rent-close="${agreement._id}">סגירת הסכם</button>
@@ -474,6 +521,10 @@ const renderRent = async () => {
     // Keep keyboard/screen-reader users at the filter after the page redraw.
     document.getElementById('rentAuthorityFilter')?.focus({ preventScroll: true });
   };
+  app.querySelectorAll('[data-rent-docs]').forEach((button) => button.onclick = () => {
+    const agreement = agreements.find((a) => a._id === button.dataset.rentDocs);
+    if (agreement) rentDocsModal(agreement);
+  });
   app.querySelectorAll('[data-rent-handed]').forEach((button) => button.onclick = async () => { try { await api(`/api/rent/payments/${button.dataset.rentHanded}/handed`, { method: 'POST' }); toast('סומן: הצ\'ק נמסר לרשות (טרם נפרע)', 'success'); await renderRent(); } catch (error) { toast(error.message, 'danger'); } });
   app.querySelectorAll('[data-rent-cleared]').forEach((button) => button.onclick = async () => { try { await api(`/api/rent/payments/${button.dataset.rentCleared}/cleared`, { method: 'POST' }); toast('התשלום סומן כנפרע', 'success'); await loadApp(); await renderRent(); } catch (error) { toast(error.message, 'danger'); } });
   app.querySelectorAll('[data-rent-close]').forEach((button) => button.onclick = () => {

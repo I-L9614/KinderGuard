@@ -6,6 +6,8 @@ import RentPaymentGroup from '../models/RentPaymentGroup.js';
 import RentAudit from '../models/RentAudit.js';
 import Branch from '../models/Branch.js';
 import { getAdminId } from '../utils/access.js';
+import { uploadFileToS3, downloadFileFromS3, deleteFileFromS3 } from '../services/s3Service.js';
+import { ALLOWED_UPLOAD_MIME, matchesDeclaredType } from '../utils/uploadTypes.js';
 
 const dayStart = (value = new Date()) => { const d = new Date(value); d.setHours(0, 0, 0, 0); return d; };
 const dayEnd = (value = new Date()) => { const d = new Date(value); d.setHours(23, 59, 59, 999); return d; };
@@ -235,6 +237,88 @@ export const createAgreement = async (req, res) => {
   await scheduleRentPayments(agreement);
   await generateDueRentReminders();
   res.status(201).json(agreement);
+};
+
+// --- Rent agreement documents (kept separate from license documents) ---
+
+const findAgreement = async (req) => {
+  const agreement = await RentAgreement.findOne({ _id: req.params.id, adminId: getAdminId(req.user) });
+  return agreement;
+};
+
+export const uploadAgreementDocument = async (req, res) => {
+  const agreement = await findAgreement(req);
+  if (!agreement) return res.status(404).json({ message: 'הסכם השכירות לא נמצא' });
+  if (!req.file) return res.status(400).json({ message: 'לא נבחר קובץ להעלאה' });
+  // The declared mimetype passed the route whitelist; now prove the bytes
+  // match it, so a renamed script can't ride into storage as a "document".
+  if (!matchesDeclaredType(req.file.buffer, req.file.mimetype)) {
+    const error = new Error('תוכן הקובץ אינו תואם את סוג הקובץ. העלו PDF או תמונה תקינים.');
+    error.statusCode = 400;
+    error.publicMessage = error.message;
+    throw error;
+  }
+  let key;
+  try {
+    key = await uploadFileToS3(req.file.buffer, req.file.originalname, req.file.mimetype, 'rent');
+  } catch (error) {
+    error.statusCode = 502;
+    error.publicMessage = 'המסמך לא הועלה לאחסון. בדקו את החיבור ונסו שוב.';
+    throw error;
+  }
+  agreement.documents.push({ key, fileName: req.file.originalname || '', uploadedAt: new Date(), uploadedBy: req.user._id });
+  await agreement.save();
+  res.status(201).json(agreement.documents[agreement.documents.length - 1]);
+};
+
+export const downloadAgreementDocument = async (req, res) => {
+  const agreement = await findAgreement(req);
+  if (!agreement) return res.status(404).json({ message: 'הסכם השכירות לא נמצא' });
+  const doc = agreement.documents.id(req.params.docId);
+  if (!doc) return res.status(404).json({ message: 'המסמך לא נמצא' });
+
+  let s3Response;
+  try {
+    s3Response = await downloadFileFromS3(doc.key);
+  } catch (error) {
+    if (error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) {
+      return res.status(404).json({ message: 'הקובץ לא נמצא באחסון. ייתכן שהוא הוסר.' });
+    }
+    error.statusCode = 502;
+    error.publicMessage = 'שירות האחסון אינו זמין כרגע. נסו שוב בעוד רגע.';
+    throw error;
+  }
+
+  const fileName = doc.fileName || 'rent-document';
+  const asciiFallback = fileName.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_');
+  // Only known document/image types render inline. Anything else downloads as
+  // an opaque attachment, never as an active page on our origin.
+  const storedType = s3Response.ContentType || 'application/octet-stream';
+  const safeInline = ALLOWED_UPLOAD_MIME.has(storedType);
+  res.setHeader('Content-Type', safeInline ? storedType : 'application/octet-stream');
+  res.setHeader('Content-Disposition', `${safeInline ? 'inline' : 'attachment'}; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  if (s3Response.ContentLength) res.setHeader('Content-Length', String(s3Response.ContentLength));
+  s3Response.Body.pipe(res);
+};
+
+// Deleting a rent document is an explicit per-document action: the agreement
+// and its payments stay untouched.
+export const deleteAgreementDocument = async (req, res) => {
+  const agreement = await findAgreement(req);
+  if (!agreement) return res.status(404).json({ message: 'הסכם השכירות לא נמצא' });
+  const doc = agreement.documents.id(req.params.docId);
+  if (!doc) return res.status(404).json({ message: 'המסמך לא נמצא' });
+  try {
+    await deleteFileFromS3(doc.key);
+  } catch (error) {
+    error.statusCode = 502;
+    error.publicMessage = 'שירות האחסון אינו זמין כרגע. נסו שוב בעוד רגע.';
+    throw error;
+  }
+  doc.deleteOne();
+  await agreement.save();
+  res.json({ message: 'המסמך נמחק' });
 };
 
 export const updateAgreement = async (req, res) => {
