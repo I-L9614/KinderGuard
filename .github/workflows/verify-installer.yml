@@ -12,6 +12,40 @@ on:
         required: true
 
 jobs:
+  # The exact link that failed for users in the field: after a silent update
+  # install the app must start again. Runs the published installer with the
+  # same flags electron-updater passes on quitAndInstall(true, true)
+  # (/S --force-run, see electron-updater NsisUpdater.js) on a pristine
+  # runner and asserts the process is up afterwards.
+  update-relaunch:
+    runs-on: windows-latest
+    steps:
+      - name: Download the published installer and update feed
+        shell: pwsh
+        run: |
+          $tag = '${{ inputs.version }}'
+          curl.exe -sL "https://github.com/I-L9614/KinderGuard/releases/download/$tag/KinderGuard-Setup-$($tag.TrimStart('v')).exe" -o installer.exe
+          curl.exe -sL "https://github.com/I-L9614/KinderGuard/releases/download/$tag/latest.yml" -o latest.yml
+          if (-not (Test-Path installer.exe)) { throw 'installer download failed' }
+          $expected = (Select-String -Path latest.yml -Pattern 'sha512: (.+)$').Matches[0].Groups[1].Value
+          $actual = [Convert]::ToBase64String([System.Security.Cryptography.SHA512]::Create().ComputeHash([IO.File]::ReadAllBytes('installer.exe')))
+          if ($actual -ne $expected) { throw "sha512 mismatch: feed=$expected actual=$actual" }
+          echo "installer matches the published latest.yml sha512"
+
+      - name: Silent update-install with the updater's exact flags
+        shell: pwsh
+        run: Start-Process .\installer.exe -ArgumentList '/S','--force-run' -Wait
+
+      - name: Assert the app relaunched after the silent install
+        shell: pwsh
+        run: |
+          $deadline = (Get-Date).AddMinutes(2)
+          do { Start-Sleep 3; $p = Get-Process KinderGuard -ErrorAction SilentlyContinue } until ($p -or (Get-Date) -gt $deadline)
+          if (-not $p) { throw 'KinderGuard did NOT relaunch after silent install with /S --force-run' }
+          echo "relaunched from: $($p[0].Path)"
+          echo "version: $((Get-Item $p[0].Path).VersionInfo.FileVersion)"
+          Stop-Process -Name KinderGuard -Force
+
   verify:
     runs-on: windows-latest
     steps:
