@@ -401,10 +401,10 @@ const openRentDoc = async (agreementId, docId) => {
   } catch (error) { toast(error.message, 'danger'); }
 };
 
-const confirmDeleteRentDoc = (agreementId, docId, fileName) => {
+const confirmDeleteRentDoc = (agreementId, docId, fileName, onDeleted) => {
   const m = modal('מחיקת מסמך שכירות', `<div class="form-grid"><p>למחוק את המסמך <strong>${esc(fileName || '')}</strong>?</p><p class="muted">הסכם השכירות והתשלומים נשארים. לא ניתן לשחזר את הקובץ אחרי המחיקה.</p><div class="button-row"><button class="danger" id="confirmDeleteRentDoc">מחיקת המסמך</button><button class="secondary" data-cancel>ביטול</button></div></div>`);
   m.wrap.querySelector('[data-cancel]').onclick = m.close;
-  m.wrap.querySelector('#confirmDeleteRentDoc').onclick = async () => { try { await api(`/api/rent/agreements/${agreementId}/documents/${docId}`, { method: 'DELETE' }); m.close(); toast('המסמך נמחק', 'success'); await renderRent(); } catch (error) { toast(error.message, 'danger'); } };
+  m.wrap.querySelector('#confirmDeleteRentDoc').onclick = async () => { try { await api(`/api/rent/agreements/${agreementId}/documents/${docId}`, { method: 'DELETE' }); m.close(); toast('המסמך נמחק', 'success'); await renderRent(); if (onDeleted) onDeleted(docId); } catch (error) { toast(error.message, 'danger'); } };
 };
 
 // Rent documents live in their own modal, fully separate from license
@@ -416,7 +416,16 @@ const rentDocsModal = (agreement) => {
     <form id="rentDocForm" class="form-grid"><label class="file-field">הוספת מסמך (PDF או תמונה)<input name="file" type="file" accept=".pdf,image/*" required><small>עד 15MB. מסמכי שכירות נשמרים בנפרד ממסמכי האישורים.</small></label><button class="primary">העלאת מסמך</button></form>
   </div>`);
   m.wrap.querySelectorAll('[data-rent-open-doc]').forEach((button) => button.onclick = () => openRentDoc(agreement._id, button.dataset.rentOpenDoc));
-  m.wrap.querySelectorAll('[data-rent-del-doc]').forEach((button) => button.onclick = () => confirmDeleteRentDoc(agreement._id, button.dataset.rentDelDoc, button.dataset.fileName));
+  // The modal stays open after a delete so several documents can be managed
+  // in one visit: drop the row immediately instead of leaving a stale entry
+  // whose second delete would 404.
+  m.wrap.querySelectorAll('[data-rent-del-doc]').forEach((button) => button.onclick = () => confirmDeleteRentDoc(agreement._id, button.dataset.rentDelDoc, button.dataset.fileName, () => {
+    button.closest('.history-row')?.remove();
+    if (!m.wrap.querySelector('[data-rent-del-doc]')) {
+      const list = m.wrap.querySelector('.history-list');
+      if (list) list.outerHTML = '<p class="muted">אין עדיין מסמכים להסכם זה.</p>';
+    }
+  }));
   m.wrap.querySelector('#rentDocForm').onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.currentTarget);

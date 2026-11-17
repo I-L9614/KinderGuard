@@ -157,3 +157,25 @@ describe('rent agreement documents modal', () => {
     expect(fetchCalls.some((c) => c.method === 'DELETE' && c.url === '/api/rent/agreements/ag1/documents/d1')).toBe(true);
   });
 });
+
+describe('rent document delete refresh', () => {
+  beforeEach(boot);
+
+  it('removes the deleted document from the open modal instead of leaving a stale entry', async () => {
+    document.querySelector('[data-page="rent"]').click();
+    await flush();
+    document.querySelector('[data-rent-docs="ag1"]').click();
+    const docsModal = document.querySelector('.modal-backdrop');
+    document.querySelector('[data-rent-del-doc="d1"]').click();
+    const confirmModal = [...document.querySelectorAll('.modal-backdrop')].pop();
+    confirmModal.querySelector('#confirmDeleteRentDoc').click();
+    await flush();
+    expect(fetchCalls.some((c) => c.method === 'DELETE' && c.url === '/api/rent/agreements/ag1/documents/d1')).toBe(true);
+    // The documents modal is still open and now shows the empty state, not
+    // the deleted file.
+    expect(docsModal.isConnected).toBe(true);
+    expect(docsModal.querySelector('[data-rent-del-doc]')).toBeNull();
+    expect(docsModal.textContent).not.toContain('contract.pdf');
+    expect(docsModal.textContent).toContain('אין עדיין מסמכים להסכם זה');
+  });
+});
