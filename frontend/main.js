@@ -14,7 +14,7 @@ const headerActions = document.getElementById('header-actions');
 // install can demand an explicit save/discard decision first.
 const updateGuard = createUpdateGuard();
 window.__updateGuard = updateGuard;
-const state = { user: null, branches: [], licenses: [], types: [], alerts: [], tasks: [], taskFilter: 'all', taskScope: 'mine', page: 'branches', branchId: null, token: null, cardFilter: null, rent: null, rentAuthorityFilter: null };
+const state = { user: null, branches: [], licenses: [], types: [], alerts: [], tasks: [], taskFilter: 'all', taskScope: 'mine', page: 'branches', branchId: null, token: null, cardFilter: null, rent: null, rentAuthorityFilter: null, reportTab: 'branch', reportScope: 'all', reportSelection: '', reportGenerated: false };
 const esc = (value = '') => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const date = (value) => value ? new Date(value).toLocaleDateString('he-IL') : '—';
 const api = async (url, options = {}) => {
@@ -150,11 +150,38 @@ const branchName = (id) => state.branches.find((b) => b._id === (id?._id || id))
 const typeName = (id) => state.types.find((t) => t._id === (id?._id || id))?.name || id?.name || 'אישור';
 const currentAlerts = () => state.alerts.filter((a) => ['Open', 'In_Progress'].includes(a.status));
 const renderHeader = () => {
-  headerActions.innerHTML = `<nav class="nav"><button data-page="branches" class="${state.page === 'branches' ? 'selected' : ''}">הסניפים שלי</button><button data-page="alerts" class="${state.page === 'alerts' ? 'selected' : ''}">התראות <b class="nav-count">${currentAlerts().length}</b></button><button data-page="tasks" class="${state.page === 'tasks' ? 'selected' : ''}">משימות <b class="nav-count">${state.tasks.filter((task) => task.status !== 'Done').length}</b></button>${state.user.role === 'Admin' ? `<button data-page="rent" class="${state.page === 'rent' ? 'selected' : ''}">שכירות</button><button data-page="settings" class="${state.page === 'settings' ? 'selected' : ''}">הגדרות וצוות</button>` : ''}</nav><div class="user-menu"><span class="user-avatar">${esc(state.user.name.slice(0, 1))}</span><span class="user-name">${esc(state.user.name)}<small>${state.user.role === 'Admin' ? 'מנהל חשבון' : 'משתמש'}</small></span><button class="icon-button" id="logout" title="התנתקות">↪</button></div>`;
+  headerActions.innerHTML = `<nav class="nav"><button data-page="branches" class="${state.page === 'branches' ? 'selected' : ''}">הסניפים שלי</button><button data-page="alerts" class="${state.page === 'alerts' ? 'selected' : ''}">התראות <b class="nav-count">${currentAlerts().length}</b></button><button data-page="tasks" class="${state.page === 'tasks' ? 'selected' : ''}">משימות <b class="nav-count">${state.tasks.filter((task) => task.status !== 'Done').length}</b></button>${state.user.role === 'Admin' ? `<button data-page="rent" class="${state.page === 'rent' ? 'selected' : ''}">שכירות</button><button data-page="report" class="${state.page === 'report' ? 'selected' : ''}">▤ דוחות</button><button data-page="settings" class="${state.page === 'settings' ? 'selected' : ''}">הגדרות וצוות</button>` : ''}</nav><div class="user-menu"><span class="user-avatar">${esc(state.user.name.slice(0, 1))}</span><span class="user-name">${esc(state.user.name)}<small>${state.user.role === 'Admin' ? 'מנהל חשבון' : 'משתמש'}</small></span><button class="icon-button" id="logout" title="התנתקות">↪</button></div>`;
   headerActions.querySelectorAll('[data-page]').forEach((button) => button.onclick = () => { state.page = button.dataset.page; state.branchId = null; render(); });
   document.getElementById('logout').onclick = async () => { try { await api('/api/auth/logout', { method: 'POST' }); } catch {} state.user = null; state.token = null; renderAuth(); };
 };
-const render = () => { renderHeader(); if (state.page === 'alerts') return renderAlerts(); if (state.page === 'tasks') return renderTasks(); if (state.page === 'rent') return renderRent(); if (state.page === 'settings') return renderSettings(); if (state.branchId) return renderBranch(); return renderBranches(); };
+const render = () => { renderHeader(); if (state.page === 'alerts') return renderAlerts(); if (state.page === 'tasks') return renderTasks(); if (state.page === 'rent') return renderRent(); if (state.page === 'settings') return renderSettings(); if (state.page === 'report') return renderReport(); if (state.branchId) return renderBranch(); return renderBranches(); };
+
+// Completeness of a daycare branch = the approvals it should hold (every
+// active type defined for all branches plus types defined for this branch)
+// versus what is actually uploaded. An approval within 30 days of expiry
+// still counts as present; an expired approval counts as needing action and
+// is called out separately from one that was never uploaded.
+const expectedTypesFor = (branchId) => state.types.filter((t) => !t.branchId || String(t.branchId?._id || t.branchId) === String(branchId));
+const branchLicenseFor = (branchId, typeId) => state.licenses.find((l) => String(l.branchId?._id || l.branchId) === String(branchId) && String(l.licenseTypeId?._id || l.licenseTypeId) === String(typeId));
+const branchCompleteness = (branch) => {
+  const expected = expectedTypesFor(branch._id);
+  let missing = 0, expired = 0;
+  expected.forEach((type) => {
+    const license = branchLicenseFor(branch._id, type._id);
+    if (!license) missing += 1;
+    else if (license.status === 'Expired') expired += 1;
+  });
+  return { total: expected.length, missing, expired };
+};
+const completenessPill = ({ total, missing, expired }) => {
+  if (!total) return '';
+  if (!missing && !expired) return '<span class="complete-pill good">✓ כל האישורים קיימים</span>';
+  const parts = [];
+  if (missing) parts.push(missing === 1 ? 'חסר אישור 1' : `חסרים ${missing} אישורים`);
+  if (expired) parts.push(expired === 1 ? 'אישור 1 פג תוקף' : `${expired} אישורים פגו תוקף`);
+  return `<span class="complete-pill danger">! ${parts.join(' · ')}</span>`;
+};
+const contactLine = (branch) => [branch.managerName, branch.phone, (branch.emails || []).join(', ')].filter(Boolean).join(' · ');
 
 const renderBranches = () => {
   // Only daycare branches carry permits; rented properties (offices) live in
@@ -163,7 +190,7 @@ const renderBranches = () => {
   const alerts = currentAlerts();
   const overdue = state.licenses.filter((l) => l.status === 'Expired').length;
   const soon = state.licenses.filter((l) => l.status === 'Expiring_Soon').length;
-  app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">מרכז הבקרה</div><h2>שלום ${esc(state.user.name)}, מה מצב האישורים?</h2><p>סקירה עדכנית של הסניפים והמשימות שדורשות תשומת לב.</p></div>${state.user.role === 'Admin' ? '<button id="newBranch" class="primary">＋ הוספת סניף</button>' : ''}</section><section class="stats-grid"><article class="stat-card clickable" data-card-filter="" role="button" tabindex="0" aria-pressed="${state.cardFilter === null}" title="הצגת כל הסניפים"><span class="stat-icon teal">⌂</span><div><strong>${daycares.length}</strong><small>סניפים</small></div></article><article class="stat-card clickable${state.cardFilter === 'expiring' ? ' selected' : ''}" data-card-filter="expiring" role="button" tabindex="0" aria-pressed="${state.cardFilter === 'expiring'}" title="הצגת סניפים עם אישורים לקראת פקיעה"><span class="stat-icon amber">◷</span><div><strong>${soon}</strong><small>אישורים לקראת פקיעה</small></div></article><article class="stat-card clickable${state.cardFilter === 'expired' ? ' selected' : ''}" data-card-filter="expired" role="button" tabindex="0" aria-pressed="${state.cardFilter === 'expired'}" title="הצגת סניפים עם אישורים שפג תוקפם"><span class="stat-icon coral">!</span><div><strong>${overdue}</strong><small>אישורים שפג תוקפם</small></div></article><article class="stat-card clickable" id="alertsSummary"><span class="stat-icon blue">♧</span><div><strong>${alerts.length}</strong><small>התראות לטיפול</small></div></article></section><section class="section-heading"><div><h3>הסניפים שלך</h3><p>בחרו סניף כדי לראות את כל האישורים וההיסטוריה שלו</p></div><span class="muted">${daycares.length} סניפים</span></section>${daycares.length ? '<div class="search-row"><input type="search" class="search-input" id="branchSearch" placeholder="חיפוש סניף לפי שם או כתובת" aria-label="חיפוש סניף"></div>' : ''}<section class="branch-grid" id="branchGrid">${daycares.length ? daycares.map((branch) => { const licenses = state.licenses.filter((l) => (l.branchId?._id || l.branchId) === branch._id); const expiring = licenses.filter((l) => l.status === 'Expiring_Soon').length; const expiredCount = licenses.filter((l) => l.status === 'Expired').length; return `<article class="branch-card" data-branch="${branch._id}" data-search="${esc((branch.name || '') + ' ' + (branch.address || ''))}" role="button" tabindex="0" aria-label="${esc(branch.name)}"><div class="branch-card-top"><span class="branch-symbol">⌂</span><span class="branch-card-actions">${state.user.role === 'Admin' ? `<button class="icon-button branch-delete" data-delete-branch="${branch._id}" title="מחיקת סניף" aria-label="מחיקת ${esc(branch.name)}">🗑</button>` : ''}<span class="arrow">←</span></span></div><h3>${esc(branch.name)}</h3><p>${esc(branch.address || 'כתובת לא הוגדרה')}</p>${branch.managerName ? `<p class="muted small-text">מנהלת: ${esc(branch.managerName)}${branch.phone ? ` · ${esc(branch.phone)}` : ''}</p>` : ''}<div class="branch-card-bottom"><span>${licenses.length} אישורים</span><span class="branch-signals">${expiredCount ? `<i class="dot danger"></i>${expiredCount} פגו` : ''}${expiring ? `<i class="dot warning"></i>${expiring} לקראת פקיעה` : ''}${!expiredCount && !expiring ? '<i class="dot good"></i>הכול תקין' : ''}</span></div></article>`; }).join('') : `<div class="empty-state"><span>⌂</span><h3>עוד אין סניפים</h3><p>הוסיפו את הסניף הראשון כדי להתחיל לנהל את האישורים שלו.</p></div>`}</section><div class="empty-state" id="noBranchMatches" hidden><span>⌂</span><h3>לא נמצאו סניפים תואמים</h3><p>נסו לשנות את מילות החיפוש.</p></div>`;
+  app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">מרכז הבקרה</div><h2>שלום ${esc(state.user.name)}, מה מצב האישורים?</h2><p>סקירה עדכנית של הסניפים והמשימות שדורשות תשומת לב.</p></div>${state.user.role === 'Admin' ? '<button id="newBranch" class="primary">＋ הוספת סניף</button>' : ''}</section><section class="stats-grid"><article class="stat-card clickable" data-card-filter="" role="button" tabindex="0" aria-pressed="${state.cardFilter === null}" title="הצגת כל הסניפים"><span class="stat-icon teal">⌂</span><div><strong>${daycares.length}</strong><small>סניפים</small></div></article><article class="stat-card clickable${state.cardFilter === 'expiring' ? ' selected' : ''}" data-card-filter="expiring" role="button" tabindex="0" aria-pressed="${state.cardFilter === 'expiring'}" title="הצגת סניפים עם אישורים לקראת פקיעה"><span class="stat-icon amber">◷</span><div><strong>${soon}</strong><small>אישורים לקראת פקיעה</small></div></article><article class="stat-card clickable${state.cardFilter === 'expired' ? ' selected' : ''}" data-card-filter="expired" role="button" tabindex="0" aria-pressed="${state.cardFilter === 'expired'}" title="הצגת סניפים עם אישורים שפג תוקפם"><span class="stat-icon coral">!</span><div><strong>${overdue}</strong><small>אישורים שפג תוקפם</small></div></article><article class="stat-card clickable" id="alertsSummary"><span class="stat-icon blue">♧</span><div><strong>${alerts.length}</strong><small>התראות לטיפול</small></div></article></section><section class="section-heading"><div><h3>הסניפים שלך</h3><p>בחרו סניף כדי לראות את כל האישורים וההיסטוריה שלו · אישור לקראת פקיעה נספר כקיים בסימון השלמות</p></div><span class="muted">${daycares.length} סניפים</span></section>${daycares.length ? '<div class="search-row"><input type="search" class="search-input" id="branchSearch" placeholder="חיפוש סניף לפי שם או כתובת" aria-label="חיפוש סניף"></div>' : ''}<section class="branch-grid" id="branchGrid">${daycares.length ? daycares.map((branch) => { const licenses = state.licenses.filter((l) => (l.branchId?._id || l.branchId) === branch._id); const expiring = licenses.filter((l) => l.status === 'Expiring_Soon').length; const expiredCount = licenses.filter((l) => l.status === 'Expired').length; return `<article class="branch-card" data-branch="${branch._id}" data-search="${esc((branch.name || '') + ' ' + (branch.address || ''))}" role="button" tabindex="0" aria-label="${esc(branch.name)}"><div class="branch-card-top"><span class="branch-symbol">⌂</span><span class="branch-card-actions">${state.user.role === 'Admin' ? `<button class="icon-button branch-delete" data-delete-branch="${branch._id}" title="מחיקת סניף" aria-label="מחיקת ${esc(branch.name)}">🗑</button>` : ''}<span class="arrow">←</span></span></div><h3>${esc(branch.name)}</h3><p>${esc(branch.address || 'כתובת לא הוגדרה')}</p>${branch.managerName ? `<p class="muted small-text">מנהלת: ${esc(branch.managerName)}${branch.phone ? ` · ${esc(branch.phone)}` : ''}</p>` : ''}<div class="branch-card-bottom"><span>${licenses.length} אישורים</span><span class="branch-signals">${expiredCount ? `<i class="dot danger"></i>${expiredCount} פגו` : ''}${expiring ? `<i class="dot warning"></i>${expiring} לקראת פקיעה` : ''}${!expiredCount && !expiring ? '<i class="dot good"></i>הכול תקין' : ''}</span></div>${branchCompleteness(branch).total ? `<div class="complete-row">${completenessPill(branchCompleteness(branch))}</div>` : ''}</article>`; }).join('') : `<div class="empty-state"><span>⌂</span><h3>עוד אין סניפים</h3><p>הוסיפו את הסניף הראשון כדי להתחיל לנהל את האישורים שלו.</p></div>`}</section><div class="empty-state" id="noBranchMatches" hidden><span>⌂</span><h3>לא נמצאו סניפים תואמים</h3><p>נסו לשנות את מילות החיפוש.</p></div>`;
   document.getElementById('alertsSummary').onclick = () => { state.page = 'alerts'; render(); };
   app.querySelectorAll('[data-branch]').forEach((node) => {
     const openBranch = () => { state.branchId = node.dataset.branch; state.cardFilter = null; render(); };
@@ -324,6 +351,80 @@ const licenseForm = (selectedBranch = null, availableTypes = state.types) => {
   };
   if (!selectedBranch && state.branches.length) m.wrap.querySelector('[name="branchId"]').dispatchEvent(new Event('change'));
   m.wrap.querySelector('form').onsubmit = async (e) => { e.preventDefault(); const f = new FormData(e.currentTarget); if (new Date(f.get('expiryDate')) < new Date(f.get('issueDate'))) return toast('תאריך הפקיעה חייב להיות אחרי תאריך ההתחלה', 'warning'); try { await api('/api/licenses', { method: 'POST', body: f }); m.close(); toast('האישור נשמר. אם היה אישור קודם, הוא הועבר להיסטוריה.', 'success'); await loadApp(); if (state.branchId) await renderBranch(); } catch (error) { toast(error.message, 'danger'); } };
+};
+
+
+// ---- Reports (manager-only) ----
+const reportScopeLabel = () => ({ all: 'הכול - קיימים ודורשים טיפול', existing: 'רק אישורים קיימים', action: 'רק דורשים טיפול (פגו / חסרים)' }[state.reportScope] || '');
+const statusPillFor = (license) => !license
+  ? '<span class="status-pill danger">חסר - לא קיים</span>'
+  : license.status === 'Expired'
+    ? '<span class="status-pill danger">פג תוקף</span>'
+    : '<span class="status-pill good">קיים</span>';
+const existingPillFor = (license) => license.status === 'Expired'
+  ? '<span class="status-pill warning">קיים - פג תוקף</span>'
+  : '<span class="status-pill good">קיים</span>';
+const typeScopeChip = (type) => `<span class="scope-chip">${type.branchId ? 'סניף זה' : 'כל הסניפים'}</span>`;
+
+const buildBranchReportBlock = (branch) => {
+  const expected = expectedTypesFor(branch._id);
+  const existing = expected.map((type) => ({ type, license: branchLicenseFor(branch._id, type._id) })).filter((row) => row.license);
+  const action = expected.map((type) => ({ type, license: branchLicenseFor(branch._id, type._id) })).filter((row) => !row.license || row.license.status === 'Expired');
+  const expiredCount = existing.filter((row) => row.license.status === 'Expired').length;
+  const contact = contactLine(branch);
+  const showExisting = state.reportScope !== 'action';
+  const showAction = state.reportScope !== 'existing';
+  return `<section class="report-block"><div class="section-heading"><div><h3>${esc(branch.name)}</h3><p>${esc(contact || 'אין פרטי קשר לסניף')}</p></div></div><div class="report-summary"><span class="good">קיימים: ${existing.length}${expiredCount ? ` (מתוכם ${expiredCount} פג תוקף)` : ''}</span><span class="bad">דורשים טיפול: ${action.length}</span></div>${!expected.length ? '<p class="muted">לא הוגדרו סוגי אישורים החלים על הסניף.</p>' : ''}${showExisting && existing.length ? `<div class="section-heading"><div><h3 class="report-sub">אישורים קיימים בסניף</h3><p>כולל אישורים שפג תוקפם - מסומנים במפורש</p></div></div><table class="report-table"><tr><th>סוג אישור</th><th>סטטוס</th><th>בתוקף עד</th></tr>${existing.map((row) => `<tr><td>${esc(row.type.name)} ${typeScopeChip(row.type)}</td><td>${existingPillFor(row.license)}</td><td>${row.license.status === 'Expired' ? `פג ב־${date(row.license.expiryDate)}` : date(row.license.expiryDate)}</td></tr>`).join('')}</table>` : ''}${showAction && action.length ? `<div class="section-heading report-gap"><div><h3 class="report-sub">אישורים דורשים טיפול</h3><p>פגו תוקף או לא הוזנו כלל - כולל פרטי קשר של הסניף</p></div></div><table class="report-table"><tr><th>סוג אישור</th><th>סטטוס</th><th>פרטי קשר לטיפול</th></tr>${action.map((row) => `<tr class="missing"><td>${esc(row.type.name)} ${typeScopeChip(row.type)}</td><td>${statusPillFor(row.license)}</td><td><strong>${esc(contact || '—')}</strong></td></tr>`).join('')}</table>` : ''}${showExisting && !existing.length && expected.length ? '<p class="muted">אין אישורים קיימים בסניף.</p>' : ''}${showAction && !action.length && expected.length ? '<p class="muted">כל האישורים קיימים ובתוקף - אין מה לטפל.</p>' : ''}</section>`;
+};
+
+const buildTypeReportBlock = (type) => {
+  const daycares = state.branches.filter((b) => b.kind !== 'property');
+  const applicable = type.branchId ? daycares.filter((b) => String(b._id) === String(type.branchId?._id || type.branchId)) : daycares;
+  const rows = applicable.map((branch) => ({ branch, license: branchLicenseFor(branch._id, type._id) }));
+  const existing = rows.filter((row) => row.license);
+  const action = rows.filter((row) => !row.license || row.license.status === 'Expired');
+  const expiredCount = existing.filter((row) => row.license.status === 'Expired').length;
+  const showExisting = state.reportScope !== 'action';
+  const showAction = state.reportScope !== 'existing';
+  return `<section class="report-block"><div class="report-summary"><span>${applicable.length} סניפים</span><span class="good">קיים: ${existing.length}${expiredCount ? ` (מתוכם ${expiredCount} פג תוקף)` : ''}</span><span class="bad">דורש טיפול: ${action.length}</span></div>${showExisting && existing.length ? `<div class="section-heading"><div><h3 class="report-sub">סניפים עם האישור</h3><p>כולל סניפים שהאישור שלהם פג תוקף - מסומנים במפורש</p></div></div><table class="report-table"><tr><th>סניף</th><th>סטטוס</th><th>בתוקף עד</th><th>פרטי קשר</th></tr>${existing.map((row) => `<tr><td>${esc(row.branch.name)}</td><td>${existingPillFor(row.license)}</td><td>${row.license.status === 'Expired' ? `פג ב־${date(row.license.expiryDate)}` : date(row.license.expiryDate)}</td><td class="muted">${esc(contactLine(row.branch) || '—')}</td></tr>`).join('')}</table>` : ''}${showAction && action.length ? `<div class="section-heading report-gap"><div><h3 class="report-sub">סניפים דורשי טיפול</h3><p>האישור פג תוקף או לא קיים - עם פרטי הקשר להעברה לטיפול</p></div></div><table class="report-table"><tr><th>סניף</th><th>סטטוס</th><th>פרטי קשר לטיפול</th></tr>${action.map((row) => `<tr class="missing"><td>${esc(row.branch.name)}</td><td>${statusPillFor(row.license)}</td><td><strong>${esc(contactLine(row.branch) || '—')}</strong></td></tr>`).join('')}</table>` : ''}${showExisting && !existing.length ? '<p class="muted">אין סניפים עם האישור.</p>' : ''}${showAction && !action.length ? '<p class="muted">כל הסניפים מסודרים באישור זה.</p>' : ''}</section>`;
+};
+
+const renderReport = () => {
+  // Manager-only surface: a branch user is bounced back to his branches.
+  if (state.user.role !== 'Admin') { state.page = 'branches'; return renderBranches(); }
+  const daycares = state.branches.filter((b) => b.kind !== 'property');
+  const isBranchTab = state.reportTab === 'branch';
+  const options = isBranchTab
+    ? '<option value="all">כל הסניפים</option>' + daycares.map((b) => `<option value="${b._id}">${esc(b.name)}</option>`).join('')
+    : state.types.map((t) => `<option value="${t._id}">${esc(t.name)}${t.branchId ? ` (רק ${esc(branchName(t.branchId))})` : ''}</option>`).join('');
+  const selectLabel = isBranchTab ? 'בחירת סניף' : 'בחירת סוג אישור';
+  let results = '';
+  let printHead = '';
+  if (state.reportGenerated) {
+    const generated = date(new Date().toISOString());
+    if (isBranchTab) {
+      const targets = state.reportSelection === 'all' ? daycares : daycares.filter((b) => b._id === state.reportSelection);
+      const names = state.reportSelection === 'all' ? 'כל הסניפים' : (targets[0]?.name || '');
+      printHead = `דוח שלמות אישורים · לפי סניף · ${esc(names)}`;
+      results = targets.length ? targets.map(buildBranchReportBlock).join('') : '<p class="muted">לא נמצאו סניפים.</p>';
+    } else {
+      const type = state.types.find((t) => t._id === state.reportSelection);
+      printHead = `דוח שלמות אישורים · לפי סוג אישור · ${esc(type?.name || '')}`;
+      results = type ? buildTypeReportBlock(type) : '<p class="muted">לא נמצא סוג האישור.</p>';
+    }
+    results = `<div class="print-only report-print-head"><div><h2>${printHead}</h2><p>הופק ב־${generated} · היקף: ${reportScopeLabel()}</p></div><strong>KinderGuard</strong></div><p class="report-meta">הופק ב־${generated} · היקף: ${reportScopeLabel()}</p>` + results;
+  }
+  app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">דוחות למנהל</div><h2>דוח שלמות אישורים</h2><p>מה קיים, מה פג תוקף ומה חסר - לכל סניף או לכל סוג אישור. אפשר לבחור מה יוצג ויודפס.</p></div><button class="secondary" id="printReport" ${state.reportGenerated ? '' : 'disabled'}>הדפסה / שמירה כ־PDF</button></section><div class="report-tabs"><button class="tab ${isBranchTab ? 'active' : ''}" data-report-tab="branch">לפי סניף</button><button class="tab ${!isBranchTab ? 'active' : ''}" data-report-tab="type">לפי סוג אישור</button></div><section class="panel"><div class="section-heading"><div><h3>הפקת דוח</h3><p>בחרו סוג דוח, ${isBranchTab ? 'סניף' : 'סוג אישור'} ומה לכלול - ואז לחצו "הפקת דוח"</p></div></div><div class="report-controls"><label>${selectLabel}<select id="reportSelect">${options}</select></label><div class="report-scope"><span>מה להציג ולהדפיס:</span><label class="check-row"><input type="radio" name="reportScope" value="all" ${state.reportScope === 'all' ? 'checked' : ''}>הכול - קיימים ודורשים טיפול</label><label class="check-row"><input type="radio" name="reportScope" value="existing" ${state.reportScope === 'existing' ? 'checked' : ''}>רק אישורים קיימים</label><label class="check-row"><input type="radio" name="reportScope" value="action" ${state.reportScope === 'action' ? 'checked' : ''}>רק דורשים טיפול (פגו / חסרים)</label></div><button class="primary report-go" id="generateReport">הפקת דוח</button></div><div id="reportResults">${results || '<div class="empty-state report-empty"><span>▤</span><h3>הדוח יוצג כאן</h3><p>אחרי ההפקה אפשר יהיה להדפיס אותו או לשמור כ־PDF ולשלוח למי שצריך.</p></div>'}</div></section>`;
+  const select = document.getElementById('reportSelect');
+  if (state.reportSelection && [...select.options].some((o) => o.value === state.reportSelection)) select.value = state.reportSelection;
+  app.querySelectorAll('[data-report-tab]').forEach((button) => button.onclick = () => { state.reportTab = button.dataset.reportTab; state.reportSelection = ''; state.reportGenerated = false; render(); });
+  document.getElementById('generateReport').onclick = () => {
+    state.reportSelection = select.value;
+    state.reportScope = document.querySelector('[name="reportScope"]:checked')?.value || 'all';
+    state.reportGenerated = true;
+    render();
+  };
+  document.getElementById('printReport').onclick = () => window.print();
 };
 
 const renderAlerts = () => {

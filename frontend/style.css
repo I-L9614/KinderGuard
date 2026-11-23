@@ -146,3 +146,46 @@
 #licenseList{grid-template-columns:minmax(0,1fr);min-width:0}
 #licenseList .approval-card{min-width:0}
 #licenseList .approval-menu-items .text-button{padding:12px;min-height:44px}
+/* Completeness pills on branch cards */
+.complete-row{margin-top:10px;padding-top:10px;border-top:1px dashed #edf1ef;display:flex}
+.complete-pill{display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:99px;font-size:11px;font-weight:700}
+.complete-pill.good{background:#e7f4eb;color:var(--good)}
+.complete-pill.danger{background:#ffeded;color:var(--danger)}
+/* Reports page */
+.report-tabs{display:flex;gap:6px;margin-bottom:20px;padding:4px;border-radius:12px;background:#f0f5f2;max-width:420px}
+.report-tabs .tab{padding:11px;font-size:13px}
+.report-controls{display:grid;gap:15px;max-width:560px}
+.report-controls>label{display:grid;gap:7px;font-size:12px;color:#587076;font-weight:600}
+.report-controls select{padding:11px 12px;border-radius:10px;border:1px solid #dce7e2;background:#fbfdfc;color:var(--ink);outline:none;font:inherit}
+.report-scope{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.report-scope>span{font-size:12px;font-weight:700;color:#587076}
+.report-go{justify-self:start}
+.report-empty{margin-top:24px}
+.report-block{margin-top:22px}
+.report-sub{font-size:15px}
+.report-gap{margin-top:26px}
+.report-table{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:6px}
+.report-table th{text-align:right;color:var(--muted);font-size:11px;font-weight:700;padding:10px 8px;border-bottom:2px solid var(--line)}
+.report-table td{padding:11px 8px;border-bottom:1px solid #edf1ef;vertical-align:middle}
+.report-table tr.missing td{background:#fffafa}
+.scope-chip{font-size:10px;color:#849a97;background:#edf4f1;padding:3px 7px;border-radius:99px;margin-right:6px}
+.report-summary{display:flex;gap:9px;flex-wrap:wrap;margin:0 0 16px}
+.report-summary span{padding:8px 13px;border-radius:99px;font-size:12px;font-weight:700;background:#eef4f1;color:#355257}
+.report-summary span.good{background:#e7f4eb;color:var(--good)}
+.report-summary span.bad{background:#ffeded;color:var(--danger)}
+.report-meta{color:var(--muted);font-size:11px;margin:14px 0 4px}
+.print-only{display:none}
+.report-print-head{display:none}
+@media print{
+  .topbar,.footer,.welcome-row,.report-tabs,.report-controls,.report-empty,.toast{display:none!important}
+  .print-only{display:block}
+  .report-print-head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid var(--teal);padding-bottom:10px;margin-bottom:10px}
+  .report-print-head h2{margin:0 0 3px;font-size:19px}
+  .report-print-head p{margin:0;color:var(--muted);font-size:11px}
+  .report-print-head strong{color:var(--teal);font-size:13px}
+  .content{padding:0}
+  .panel{box-shadow:none;border:0;padding:0}
+  .report-block{page-break-inside:avoid}
+  body{background:#fff}
+}
+@media(max-width:620px){.report-scope{align-items:flex-start;flex-direction:column;gap:5px}.report-table{font-size:12px}}
