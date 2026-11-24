@@ -185,7 +185,11 @@
   .report-print-head strong{color:var(--teal);font-size:13px}
   .content{padding:0}
   .panel{box-shadow:none;border:0;padding:0}
-  .report-block{page-break-inside:avoid}
+  .report-ui,.report-meta{display:none!important}
+  .report-block{break-inside:auto;page-break-inside:auto}
+  .report-table thead{display:table-header-group}
+  .report-table tr{break-inside:avoid;page-break-inside:avoid}
+  .report-block .section-heading,.report-summary{break-after:avoid;page-break-after:avoid}
   body{background:#fff}
 }
 @media(max-width:620px){.report-scope{align-items:flex-start;flex-direction:column;gap:5px}.report-table{font-size:12px}}
