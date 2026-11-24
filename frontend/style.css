@@ -189,3 +189,6 @@
   body{background:#fff}
 }
 @media(max-width:620px){.report-scope{align-items:flex-start;flex-direction:column;gap:5px}.report-table{font-size:12px}}
+
+.type-chip small.type-state{font-weight:700;font-size:10px}.type-chip small.type-state.present{background:#e7f4eb;color:var(--good)}.type-chip small.type-state.missing{background:#ffeded;color:var(--danger)}.type-chip small.type-state.expired{background:#fff2df;color:var(--warning)}
+.settings-type[hidden]{display:none}
