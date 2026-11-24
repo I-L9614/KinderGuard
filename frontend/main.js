@@ -87,6 +87,7 @@ const openLicenseFile = async (licenseId) => {
 };
 
 const renderAuth = () => {
+  removeMobileNav();
   headerActions.innerHTML = '';
   app.innerHTML = `<section class="auth-layout"><div class="auth-intro"><div class="eyebrow">ניהול אישורים למעונות יום</div><h2>כל הסניפים.<br>כל האישורים.<br><span>בלי לפספס חידוש.</span></h2><p>מקום אחד לעקוב אחרי אישורים, מועדי פקיעה ומשימות חידוש.</p><div class="auth-decoration"><span>✓</span><span>30 יום</span><span>7 ימים</span><span>יום הפקיעה</span></div></div><div class="panel auth-panel"><div class="tabs"><button class="tab active" data-tab="login">התחברות</button><button class="tab" data-tab="register">פתיחת חשבון מנהל</button></div><form id="authForm"><label>כתובת דוא״ל<input name="email" type="email" autocomplete="username" required></label><label>סיסמה<input name="password" type="password" autocomplete="current-password" minlength="8" required></label><div id="nameField" hidden><label>שם מלא<input name="name" autocomplete="name"></label></div><button class="primary full" type="submit">התחברות</button><p id="authHint" class="muted">התחברו לחשבון KinderGuard שלכם.</p></form></div></section>`;
   let mode = 'login';
@@ -153,6 +154,37 @@ const renderHeader = () => {
   headerActions.innerHTML = `<nav class="nav"><button data-page="branches" class="${state.page === 'branches' ? 'selected' : ''}">הסניפים שלי</button><button data-page="alerts" class="${state.page === 'alerts' ? 'selected' : ''}">התראות <b class="nav-count">${currentAlerts().length}</b></button><button data-page="tasks" class="${state.page === 'tasks' ? 'selected' : ''}">משימות <b class="nav-count">${state.tasks.filter((task) => task.status !== 'Done').length}</b></button>${state.user.role === 'Admin' ? `<button data-page="rent" class="${state.page === 'rent' ? 'selected' : ''}">שכירות</button><button data-page="report" class="${state.page === 'report' ? 'selected' : ''}">▤ דוחות</button><button data-page="settings" class="${state.page === 'settings' ? 'selected' : ''}">הגדרות וצוות</button>` : ''}</nav><div class="user-menu"><span class="user-avatar">${esc(state.user.name.slice(0, 1))}</span><span class="user-name">${esc(state.user.name)}<small>${state.user.role === 'Admin' ? 'מנהל חשבון' : 'משתמש'}</small></span><button class="icon-button" id="logout" title="התנתקות">↪</button></div>`;
   headerActions.querySelectorAll('[data-page]').forEach((button) => button.onclick = () => { state.page = button.dataset.page; state.branchId = null; render(); });
   document.getElementById('logout').onclick = async () => { try { await api('/api/auth/logout', { method: 'POST' }); } catch {} state.user = null; state.token = null; renderAuth(); };
+  renderMobileNav();
+};
+// Phone-width bottom navigation (shown by CSS only at <=620px; desktop keeps the top nav).
+// Same destinations and role rules as the top nav; "עוד" holds the rarely used pages.
+const NAV_ICONS = {
+  branches: '<path d="M3 11l9-7 9 7v9a1 1 0 01-1 1h-5v-6H9v6H4a1 1 0 01-1-1z"/>',
+  alerts: '<path d="M6 9a6 6 0 0112 0c0 6 2 7 2 7H4s2-1 2-7"/><path d="M10 20a2 2 0 004 0"/>',
+  tasks: '<circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/>',
+  rent: '<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h3"/>',
+  report: '<path d="M7 3h8l4 4v14H7z"/><path d="M15 3v4h4M10 12h6M10 16h6"/>',
+  settings: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>',
+  more: '<circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>'
+};
+const navIcon = (key) => `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${NAV_ICONS[key]}</svg>`;
+const removeMobileNav = () => { document.getElementById('mobile-nav')?.remove(); document.body.classList.remove('has-mobile-nav'); };
+const renderMobileNav = () => {
+  let host = document.getElementById('mobile-nav');
+  if (!host) { host = document.createElement('div'); host.id = 'mobile-nav'; document.body.appendChild(host); }
+  document.body.classList.add('has-mobile-nav');
+  const isAdmin = state.user.role === 'Admin';
+  const alertCount = currentAlerts().length;
+  const taskCount = state.tasks.filter((task) => task.status !== 'Done').length;
+  const tab = (page, label, count) => `<button data-mpage="${page}" class="${state.page === page ? 'selected' : ''}" ${state.page === page ? 'aria-current="page"' : ''}><i>${navIcon(page)}</i><span>${label}</span>${count ? `<em aria-label="${count} ממתינים">${count}</em>` : ''}</button>`;
+  const moreItems = [['rent', 'שכירות'], ['report', 'דוחות'], ['settings', 'הגדרות וצוות']];
+  const moreActive = moreItems.some(([page]) => state.page === page);
+  host.innerHTML = `<nav class="mobile-tabbar" aria-label="ניווט ראשי">${tab('branches', 'סניפים')}${tab('alerts', 'התראות', alertCount)}${tab('tasks', 'משימות', taskCount)}${isAdmin ? `<button id="mobileMore" class="${moreActive ? 'selected' : ''}" aria-haspopup="true" aria-expanded="false"><i>${navIcon('more')}</i><span>עוד</span></button>` : ''}</nav>${isAdmin ? `<div class="mobile-more" id="mobileMoreSheet" hidden>${moreItems.map(([page, label]) => `<button data-mpage="${page}" class="${state.page === page ? 'selected' : ''}"><i>${navIcon(page)}</i>${label}</button>`).join('')}</div>` : ''}`;
+  const sheet = document.getElementById('mobileMoreSheet');
+  const moreButton = document.getElementById('mobileMore');
+  const closeSheet = () => { if (sheet) sheet.hidden = true; moreButton?.setAttribute('aria-expanded', 'false'); };
+  moreButton?.addEventListener('click', () => { sheet.hidden = !sheet.hidden; moreButton.setAttribute('aria-expanded', String(!sheet.hidden)); });
+  host.querySelectorAll('[data-mpage]').forEach((button) => button.addEventListener('click', () => { closeSheet(); state.page = button.dataset.mpage; state.branchId = null; render(); window.scrollTo(0, 0); }));
 };
 const render = () => { renderHeader(); if (state.page === 'alerts') return renderAlerts(); if (state.page === 'tasks') return renderTasks(); if (state.page === 'rent') return renderRent(); if (state.page === 'settings') return renderSettings(); if (state.page === 'report') return renderReport(); if (state.branchId) return renderBranch(); return renderBranches(); };
 
