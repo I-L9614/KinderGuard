@@ -219,3 +219,35 @@
   .toast{bottom:calc(88px + env(safe-area-inset-bottom))}
 }
 @media print{#mobile-nav{display:none!important}body.has-mobile-nav{padding-bottom:0}}
+
+/* Desktop top bar (approved option B): dark teal bar, icon tabs, red counters. Phone widths (<=620px) keep the approved bottom navigation. */
+@media (min-width:621px){
+  .topbar{background:linear-gradient(100deg,#0b3a45,#06222c);border-bottom:0;color:#fff;gap:18px;min-height:74px;padding-top:0;padding-bottom:0;box-shadow:0 8px 24px #06222c26}
+  .topbar .brand h1{color:#fff}
+  .topbar .brand p{color:#8fb8b6}
+  #header-actions{display:contents}
+  .topbar .brand{order:1}
+  .topbar .nav{order:2;gap:2px;align-self:stretch;margin-inline-end:auto}
+  #update-slot{order:3}
+  .topbar .user-menu{order:4;gap:10px;color:#fff;padding-inline-start:16px;border-inline-start:1px solid #ffffff25}
+  .topbar .nav button{display:flex;align-items:center;gap:7px;white-space:nowrap;color:#a9c9c6;padding:0 12px;height:100%;min-height:74px;border-radius:0;border-bottom:3px solid transparent;font-size:13.5px;transform:none}
+  .topbar .nav button:hover{color:#fff;background:#ffffff0d}
+  .topbar .nav button.selected{color:#fff;border-bottom-color:#5eead4;background:linear-gradient(#ffffff00,#ffffff12)}
+  .topbar .nav button.selected .nav-ico{color:#5eead4}
+  .topbar .nav-count{display:inline-grid;place-items:center;min-width:18px;height:18px;margin:0;padding:0 5px;border-radius:9px;background:#d75c56;color:#fff;font-size:10.5px;font-weight:700}
+  .topbar .user-menu small{color:#8fb8b6}
+  .topbar .user-avatar{background:#5eead4;color:#06222c}
+  .topbar .icon-button{display:grid;place-items:center;color:#a9c9c6;padding:7px;border-radius:9px;font-size:inherit}
+  .topbar .icon-button:hover{background:#ffffff14;color:#fff}
+  .topbar .update-button{background:#ffffff14;border-color:#ffffff30;color:#d6efec}
+  .topbar .update-button:hover{background:#ffffff22;color:#fff}
+  .topbar .update-button.has-update{background:#f5c5181f;border-color:#f5c51866;color:#ffe08a}
+  .topbar .update-dot{border-color:#0b3a45}
+  .topbar button:focus-visible{outline-color:#5eead4}
+}
+@media (min-width:621px) and (max-width:1100px){
+  .topbar{flex-wrap:wrap;padding-top:8px;gap:8px 12px}
+  .topbar .nav{order:5;width:100%;margin:0;overflow-x:auto;justify-content:flex-start;border-top:1px solid #ffffff1f}
+  .topbar .nav button{min-height:46px}
+  .topbar .brand{margin-inline-end:auto}
+}
