@@ -9,6 +9,7 @@ import RentReminder from '../src/models/RentReminder.js';
 import Branch from '../src/models/Branch.js';
 import { generateDueRentReminders, scheduleRentPayments } from '../src/controllers/rentController.js';
 import { reconcileBranchDeletions } from '../src/services/licenseCleanup.js';
+import { israelToday, israelParts } from '../src/utils/israelTime.js';
 
 let app;
 let mongoServer;
@@ -17,7 +18,7 @@ let adminId;
 let branchId;
 let authorityId;
 
-const daysFromNow = (days) => { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + days); return d; };
+const daysFromNow = (days) => { const d = israelToday(); d.setUTCDate(d.getUTCDate() + days); return d; };
 const auth = () => ({ Authorization: `Bearer ${token}` });
 
 beforeAll(async () => {
@@ -348,15 +349,15 @@ describe('Rent grouped payments, annual frequency and actual-paid reporting', ()
     const branchRow = report.body.authorities[0].branches.find((b) => String(b.branchId) === String(branchBId));
     const outstanding = await RentPayment.find({ branchId: branchBId, status: { $in: ['Pending', 'Handed'] } });
     const expected = outstanding
-      .filter((x) => x.dueDate.getFullYear() === new Date().getFullYear())
+      .filter((x) => x.dueDate.getFullYear() === israelParts().year)
       .reduce((sum, x) => sum + x.amount, 0);
     expect(branchRow.outstandingTotal).toBe(expected);
     expect(branchRow.outstandingTotal).toBeGreaterThanOrEqual(4000); // includes the preserved handed cheque
   });
 
   it('reports actual paid per authority and per branch with no double count, filtered by period', async () => {
-    const yearStart = `${new Date().getFullYear()}-01-01`;
-    const yearEnd = `${new Date().getFullYear()}-12-31`;
+    const yearStart = `${israelParts().year}-01-01`;
+    const yearEnd = `${israelParts().year}-12-31`;
     const report = await request(app).get(`/api/rent/reports/paid?from=${yearStart}&to=${yearEnd}`).set(auth()).expect(200);
     const shafir = report.body.authorities.find((a) => a.authorityName === 'מועצה אזורית שפיר');
     expect(shafir).toBeDefined();
@@ -443,7 +444,7 @@ describe('Rent group persistence hardening and report date modes', () => {
   });
 
   it('cleared-date mode reports money that arrived in the period only', async () => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = israelToday().toISOString().slice(0, 10);
     const cleared = await request(app).get(`/api/rent/reports/paid?from=${today}&to=${today}&dateField=cleared`).set(auth()).expect(200);
     expect(cleared.body.dateField).toBe('cleared');
     const total = cleared.body.authorities.reduce((s, a) => s + a.clearedTotal, 0);

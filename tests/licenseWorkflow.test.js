@@ -8,6 +8,7 @@ import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import { Readable } from 'stream';
 import { generateDueNotifications } from '../src/controllers/notificationController.js';
 import License from '../src/models/License.js';
+import { israelToday } from '../src/utils/israelTime.js';
 
 const s3Mock = mockClient(S3Client);
 
@@ -57,7 +58,7 @@ describe('Branch permit workflow', () => {
   }, 20000);
 
   it('serves attached files only through the authenticated download route', async () => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = israelToday().toISOString().slice(0, 10);
     const branch = await request(app).post('/api/branches').set('Authorization', `Bearer ${token}`).send({ name: 'Files Branch' }).expect(201);
     const type = await request(app).post('/api/license-types').set('Authorization', `Bearer ${token}`).send({ name: 'אישור עם קובץ', branchId: null }).expect(201);
     const license = await License.create({
@@ -96,7 +97,7 @@ describe('Branch permit workflow', () => {
   }, 20000);
 
   it('returns 404 for a license without an attached file', async () => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = israelToday().toISOString().slice(0, 10);
     const branch = await request(app).post('/api/branches').set('Authorization', `Bearer ${token}`).send({ name: 'No File Branch' }).expect(201);
     const type = await request(app).post('/api/license-types').set('Authorization', `Bearer ${token}`).send({ name: 'אישור בלי קובץ', branchId: null }).expect(201);
     const license = await License.create({
@@ -112,7 +113,7 @@ describe('Branch permit workflow', () => {
 
 
   it('rejects non-document uploads server-side before storage', async () => {
-    const issueDate = new Date().toISOString().slice(0, 10);
+    const issueDate = israelToday().toISOString().slice(0, 10);
     const response = await request(app)
       .post('/api/licenses')
       .set('Authorization', `Bearer ${token}`)
@@ -126,7 +127,7 @@ describe('Branch permit workflow', () => {
   });
 
   it('rejects a spoofed upload whose bytes do not match the declared type', async () => {
-    const issueDate = new Date().toISOString().slice(0, 10);
+    const issueDate = israelToday().toISOString().slice(0, 10);
     const response = await request(app)
       .post('/api/licenses')
       .set('Authorization', `Bearer ${token}`)
@@ -140,7 +141,7 @@ describe('Branch permit workflow', () => {
   });
 
   it('accepts a genuine PDF upload and stores it privately', async () => {
-    const issueDate = new Date().toISOString().slice(0, 10);
+    const issueDate = israelToday().toISOString().slice(0, 10);
     const pdf = Buffer.concat([Buffer.from('%PDF-1.4 fake-body-for-test'), Buffer.alloc(16, 0)]);
     const response = await request(app)
       .post('/api/licenses')
@@ -155,7 +156,7 @@ describe('Branch permit workflow', () => {
   });
 
   it('serves a stored non-document object as an opaque attachment, never inline', async () => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = israelToday().toISOString().slice(0, 10);
     const branch = await request(app).post('/api/branches').set('Authorization', `Bearer ${token}`).send({ name: 'Odd File Branch' }).expect(201);
     const type = await request(app).post('/api/license-types').set('Authorization', `Bearer ${token}`).send({ name: 'אישור חריג', branchId: null }).expect(201);
     const license = await License.create({

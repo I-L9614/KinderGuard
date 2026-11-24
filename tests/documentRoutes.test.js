@@ -8,6 +8,7 @@ import { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand } fro
 import { Readable } from 'stream';
 import License from '../src/models/License.js';
 import RentAgreement from '../src/models/RentAgreement.js';
+import { israelToday } from '../src/utils/israelTime.js';
 
 const s3Mock = mockClient(S3Client);
 
@@ -19,7 +20,7 @@ let branchId;
 let licenseTypeId;
 
 const auth = () => ({ Authorization: `Bearer ${token}` });
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => israelToday().toISOString().slice(0, 10);
 const fakePdf = () => Buffer.concat([Buffer.from('%PDF-1.4 fake-body-for-test'), Buffer.alloc(16, 0)]);
 
 beforeAll(async () => {

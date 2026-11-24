@@ -3,6 +3,7 @@ import path from 'path';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import request from 'supertest';
+import { israelToday } from '../src/utils/israelTime.js';
 
 let app;
 let mongoServer;
@@ -24,7 +25,7 @@ beforeAll(async () => {
   branchA = (await request(app).post('/api/branches').set('Authorization', `Bearer ${adminToken}`).send({ name: 'Branch A' }).expect(201)).body;
   branchB = (await request(app).post('/api/branches').set('Authorization', `Bearer ${adminToken}`).send({ name: 'Branch B' }).expect(201)).body;
   licenseTypeId = (await request(app).post('/api/license-types').set('Authorization', `Bearer ${adminToken}`).send({ name: 'אישור בטיחות', branchId: null }).expect(201)).body._id;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = israelToday().toISOString().slice(0, 10);
   await request(app).post('/api/licenses').set('Authorization', `Bearer ${adminToken}`).field('branchId', branchA._id).field('licenseTypeId', licenseTypeId).field('issueDate', today).field('expiryDate', today).expect(201);
   await request(app).post('/api/licenses').set('Authorization', `Bearer ${adminToken}`).field('branchId', branchB._id).field('licenseTypeId', licenseTypeId).field('issueDate', today).field('expiryDate', today).expect(201);
 }, 600000);
