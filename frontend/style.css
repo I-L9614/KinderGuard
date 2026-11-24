@@ -244,6 +244,13 @@
   .topbar .update-button.has-update{background:#f5c5181f;border-color:#f5c51866;color:#ffe08a}
   .topbar .update-dot{border-color:#0b3a45}
   .topbar button:focus-visible{outline-color:#5eead4}
+  .topbar .update-button{white-space:nowrap;flex:none}
+  .topbar .brand p{white-space:nowrap}
+}
+@media (min-width:1101px) and (max-width:1400px){
+  .topbar{gap:12px}
+  .topbar .nav button{padding:0 9px;gap:6px}
+  .topbar .brand p{display:none}
 }
 @media (min-width:621px) and (max-width:1100px){
   .topbar{flex-wrap:wrap;padding-top:8px;gap:8px 12px}
