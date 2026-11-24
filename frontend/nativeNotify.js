@@ -9,8 +9,17 @@
 // - Click targets route to the relevant record; stale/deleted/unauthorized
 //   targets fall back to the alerts inbox instead of erroring.
 
+import { israelParts } from './israelTime.js';
+
 export const SEEN_KEY = 'seenNotifications';
 export const SESSION_KEY = 'kg-session-primed';
+
+// Popups are held until 11:00 Israel time each day (the user is usually at the
+// computer then). Alerts stay Open in the inbox and the badge regardless; any
+// refresh at or after 11:00 shows what is still unseen, so a PC that was off or
+// an app that was closed at 11:00 gets its popup at the next launch/refresh.
+export const POPUP_HOUR_ISRAEL = 11;
+export const popupWindowOpen = (now = new Date(), hour = POPUP_HOUR_ISRAEL) => israelParts(now).hour >= hour;
 
 export const planNativeToasts = (alerts, { seenIds, firstOfSession }) => {
   const fresh = alerts.filter((item) => item.status === 'Open' && !seenIds.includes(item._id));

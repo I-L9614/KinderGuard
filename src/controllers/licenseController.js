@@ -4,12 +4,11 @@ import LicenseType from '../models/LicenseType.js';
 import Notification from '../models/Notification.js';
 import { getAdminId, hasBranchAccess } from '../utils/access.js';
 import { uploadFileToS3, downloadFileFromS3, deleteFileFromS3 } from '../services/s3Service.js';
+import { daysUntil } from '../utils/israelTime.js';
 import { ALLOWED_UPLOAD_MIME, matchesDeclaredType } from '../utils/uploadTypes.js';
 
 export const statusForExpiry = (expiryDate) => {
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const expiry = new Date(expiryDate); expiry.setHours(0, 0, 0, 0);
-  const days = Math.ceil((expiry - today) / 86400000);
+  const days = daysUntil(expiryDate);
   if (days < 0) return 'Expired';
   if (days <= 30) return 'Expiring_Soon';
   return 'Valid';

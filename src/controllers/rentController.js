@@ -6,12 +6,14 @@ import RentPaymentGroup from '../models/RentPaymentGroup.js';
 import RentAudit from '../models/RentAudit.js';
 import Branch from '../models/Branch.js';
 import { getAdminId } from '../utils/access.js';
+import { israelToday, calendarDay, israelParts, israelMidnightInstant, israelEndOfDayInstant } from '../utils/israelTime.js';
 import { uploadFileToS3, downloadFileFromS3, deleteFileFromS3 } from '../services/s3Service.js';
 import { ALLOWED_UPLOAD_MIME, matchesDeclaredType } from '../utils/uploadTypes.js';
 
-const dayStart = (value = new Date()) => { const d = new Date(value); d.setHours(0, 0, 0, 0); return d; };
-const dayEnd = (value = new Date()) => { const d = new Date(value); d.setHours(23, 59, 59, 999); return d; };
-const addMonths = (value, months) => { const d = new Date(value); d.setMonth(d.getMonth() + months); return d; };
+// Calendar days are UTC-midnight dates; "today" is the Israel date, not the server's.
+const dayStart = (value) => (value === undefined ? israelToday() : calendarDay(value));
+const dayEnd = (value) => new Date(dayStart(value).getTime() + 86400000 - 1);
+const addMonths = (value, months) => { const d = new Date(value); d.setUTCMonth(d.getUTCMonth() + months); return d; };
 const DAYS = 86400000;
 // Payments are materialized this far ahead so reminders always have rows.
 const SCHEDULE_HORIZON_MONTHS = 4;
@@ -765,10 +767,14 @@ export const revertGroupStatus = async (req, res) => {
 // arrived in the period; outstanding is due-based and shown only in due mode).
 export const getPaidReport = async (req, res) => {
   const adminId = getAdminId(req.user);
-  const now = new Date();
-  const from = validDate(req.query.from) ? dayStart(req.query.from) : dayStart(new Date(now.getFullYear(), 0, 1));
-  const to = validDate(req.query.to) ? dayEnd(req.query.to) : dayEnd(new Date(now.getFullYear(), 11, 31));
+  const year = israelParts().year;
+  const fromDay = validDate(req.query.from) ? dayStart(req.query.from) : new Date(Date.UTC(year, 0, 1));
+  const toDay = validDate(req.query.to) ? dayStart(req.query.to) : new Date(Date.UTC(year, 11, 31));
   const byClearDate = req.query.dateField === 'cleared';
+  // Due dates are stored as calendar days (UTC midnight); clear times are real
+  // instants, so that mode uses the Israel day boundaries.
+  const from = byClearDate ? israelMidnightInstant(fromDay) : fromDay;
+  const to = byClearDate ? israelEndOfDayInstant(toDay) : dayEnd(toDay);
   const filter = { adminId, status: { $ne: 'Cancelled' } };
   // Cleared mode reports money that actually arrived in the period only;
   // outstanding is a due-based concept and stays in due mode.

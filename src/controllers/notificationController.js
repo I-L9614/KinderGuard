@@ -3,12 +3,9 @@ import RentReminder from '../models/RentReminder.js';
 import License from '../models/License.js';
 import Branch from '../models/Branch.js';
 import { getAdminId } from '../utils/access.js';
+import { daysUntil } from '../utils/israelTime.js';
 
-const calendarDaysLeft = (expiryDate) => {
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const expiry = new Date(expiryDate); expiry.setHours(0, 0, 0, 0);
-  return Math.round((expiry - today) / 86400000);
-};
+const calendarDaysLeft = (expiryDate) => daysUntil(expiryDate);
 
 export const generateDueNotifications = async () => {
   const licenses = await License.find({ lifecycle: 'Active' });

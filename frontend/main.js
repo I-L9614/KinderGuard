@@ -1,7 +1,8 @@
 import { renderLicenseCard, installApprovalMenus } from './licenseCards.js';
 import { createUpdateGuard } from './updateGuard.js';
 import { parseTypePeriod, addPeriod } from './expiryAutofill.js';
-import { SEEN_KEY, SESSION_KEY, planNativeToasts, resolveAlertTarget, alertToastPayload, summaryToastPayload, testToastPayloads } from './nativeNotify.js';
+import { israelToday, israelParts } from './israelTime.js';
+import { SEEN_KEY, SESSION_KEY, popupWindowOpen, planNativeToasts, resolveAlertTarget, alertToastPayload, summaryToastPayload, testToastPayloads } from './nativeNotify.js';
 
 const app = document.getElementById('app');
 installApprovalMenus();
@@ -16,7 +17,7 @@ const updateGuard = createUpdateGuard();
 window.__updateGuard = updateGuard;
 const state = { user: null, branches: [], licenses: [], types: [], alerts: [], tasks: [], taskFilter: 'all', taskScope: 'mine', page: 'branches', branchId: null, token: null, cardFilter: null, rent: null, rentAuthorityFilter: null, reportTab: 'branch', reportScope: 'all', reportSelection: '', reportGenerated: false };
 const esc = (value = '') => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const date = (value) => value ? new Date(value).toLocaleDateString('he-IL') : '—';
+const date = (value) => value ? new Date(value).toLocaleDateString('he-IL', { timeZone: 'Asia/Jerusalem' }) : '—';
 const api = async (url, options = {}) => {
   const headers = { ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}), ...options.headers };
   const method = (options.method || 'GET').toUpperCase();
@@ -124,10 +125,12 @@ const loadApp = async () => {
     // Native Windows toasts: one summary on the first refresh of the session
     // (no burst after the app was closed), individual typed toasts afterwards.
     // Works while the window is hidden to the tray; nothing runs once quit.
+    // Held until 11:00 Israel time; before that nothing is marked seen or primed.
     const seen = JSON.parse(localStorage.getItem(SEEN_KEY) || '[]');
+    const popupsOpen = popupWindowOpen();
     const firstOfSession = !sessionStorage.getItem(SESSION_KEY);
-    sessionStorage.setItem(SESSION_KEY, '1');
-    const plan = planNativeToasts(state.alerts, { seenIds: seen, firstOfSession });
+    if (popupsOpen) sessionStorage.setItem(SESSION_KEY, '1');
+    const plan = popupsOpen ? planNativeToasts(state.alerts, { seenIds: seen, firstOfSession }) : { mode: 'none', seen: [] };
     if (plan.mode === 'summary') {
       window.electronAPI?.notify(summaryToastPayload(plan.count));
       playNotificationSound();
@@ -515,7 +518,7 @@ const renderTasks = async () => {
 
 const taskRow = (task) => {
   const done = task.status === 'Done';
-  const overdue = task.dueDate && !done && new Date(task.dueDate) < new Date(new Date().toDateString());
+  const overdue = task.dueDate && !done && new Date(task.dueDate) < israelToday();
   const branch = task.branchId ? branchName(task.branchId) : 'כל הסניפים';
   const creator = task.createdBy?.name || '';
   const meta = done
@@ -601,7 +604,7 @@ const renderRent = async () => {
   state.rent = data;
   const { authorities, agreements, payments, groups = [], totals } = data;
   const active = agreements.filter((a) => a.status === 'Active');
-  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const today = israelToday();
   const in30 = new Date(today.getTime() + 30 * 86400000);
   const upcoming = payments.filter((p) => ['Pending', 'Handed'].includes(p.status) && new Date(p.dueDate) <= in30);
   const handedCount = payments.filter((p) => p.status === 'Handed').length;
@@ -638,7 +641,7 @@ const renderRent = async () => {
   <div id="rentAuthoritiesTop"></div>${authorities.length ? `<div class="rent-authority-filter"><label for="rentAuthorityFilter">סינון לפי רשות</label><select id="rentAuthorityFilter"><option value=""${!filterId ? ' selected' : ''}>כל הרשויות</option>${authorities.map((a) => `<option value="${esc(a._id)}"${filterId === a._id ? ' selected' : ''}>${esc(a.name)}${a.type === 'private' ? ' (פרטי)' : ''}</option>`).join('')}</select></div>` : ''}
   ${visibleAuthorities.length ? visibleAuthorities.map(authorityPanel).join('') : `<div class="empty-state"><span>₪</span><h3>${authorities.length ? 'לא נמצאה רשות מתאימה' : 'עוד אין רשויות'}</h3><p>${authorities.length ? 'נסו סינון אחר.' : 'הוסיפו את הרשות הראשונה ואז הגדירו הסכם שכירות לכל מעון.'}</p></div>`}
   ${groups.length ? `<section class="panel"><div class="section-heading"><div><h3>תשלומים מרוכזים</h3><p>צ'ק או העברה אחת שמחולקת בין מספר מעונות</p></div></div><div class="license-list">${groups.map((g) => { const [cls, txt] = rentStatusPill(g.status); return `<article class="license-row"><div class="license-icon ${g.status === 'Handed' ? 'warning' : ''}">${g.method === 'cheque' ? '✎' : '⇄'}</div><div class="license-main"><strong>${esc(g.authorityName)} · ${money(g.totalAmount)}</strong><small>${rentMethodText(g.method)} · מועד ${date(g.dueDate)} · ${g.allocations.map((a) => `${esc(a.branchName)} ${money(a.amount)}`).join(' + ')}</small></div><span class="status-pill ${cls}">${txt}</span>${g.method === 'cheque' && g.status === 'Pending' ? `<button class="text-button" data-group-handed="${g._id}">סמן כנמסר</button>` : ''}${['Pending', 'Handed'].includes(g.status) ? `<button class="text-button" data-group-cleared="${g._id}">סמן כנפרע</button><button class="text-button danger-text" data-group-cancel="${g._id}">ביטול</button>` : ''}${['Handed', 'Cleared'].includes(g.status) ? `<button class="text-button" data-group-revert="${g._id}">בטל סימון</button>` : ''}</article>`; }).join('')}</div></section>` : ''}
-  <section class="panel"><div class="section-heading"><div><h3>דוח תשלומים בפועל</h3><p>כמה שולם בפועל בתקופה נבחרת - לכל רשות ולכל מעון</p></div></div><form id="paidReportForm" class="form-grid"><div class="three-col"><label>מתאריך<input type="date" name="from" value="${new Date().getFullYear()}-01-01" required></label><label>עד תאריך<input type="date" name="to" value="${new Date().getFullYear()}-12-31" required></label><label>רשות<select name="authorityId"><option value="">כל הרשויות</option>${authorities.map((a) => `<option value="${a._id}">${esc(a.name)}</option>`).join('')}</select></label></div><div class="two-col"><label>התקופה נספרת לפי<select name="dateField"><option value="due">מועד הפרעון המתוכנן (מה היה צריך לשלם, ומה עדיין פתוח)</option><option value="cleared">תאריך הפרעון בפועל (כסף שבאמת יצא בתקופה)</option></select></label><div><button class="secondary small-btn" type="submit">הפק דוח</button></div></div></form><div id="paidReportResults"></div></section>
+  <section class="panel"><div class="section-heading"><div><h3>דוח תשלומים בפועל</h3><p>כמה שולם בפועל בתקופה נבחרת - לכל רשות ולכל מעון</p></div></div><form id="paidReportForm" class="form-grid"><div class="three-col"><label>מתאריך<input type="date" name="from" value="${israelParts().year}-01-01" required></label><label>עד תאריך<input type="date" name="to" value="${israelParts().year}-12-31" required></label><label>רשות<select name="authorityId"><option value="">כל הרשויות</option>${authorities.map((a) => `<option value="${a._id}">${esc(a.name)}</option>`).join('')}</select></label></div><div class="two-col"><label>התקופה נספרת לפי<select name="dateField"><option value="due">מועד הפרעון המתוכנן (מה היה צריך לשלם, ומה עדיין פתוח)</option><option value="cleared">תאריך הפרעון בפועל (כסף שבאמת יצא בתקופה)</option></select></label><div><button class="secondary small-btn" type="submit">הפק דוח</button></div></div></form><div id="paidReportResults"></div></section>
   <section id="rentHistoryPanel"></section>`;
   document.getElementById('newAuthority').onclick = authorityForm;
   document.getElementById('newAgreement').onclick = () => rentAgreementForm();
