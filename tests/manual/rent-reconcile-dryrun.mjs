@@ -102,6 +102,51 @@ for (const p of newRows) {
   perAg[label].dates.push(p.dueDate.toISOString().slice(0, 10));
 }
 
+// ---- Full cadence verification: every row of every active agreement must sit
+// exactly on its cadence from the anchor, with the cadence's amount, and every
+// expected date in the 12-month window must have a row.
+const dayStart = (d) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+const addMonthsClamped = (value, months) => {
+  const d = new Date(value);
+  const target = d.getUTCMonth() + months;
+  const year = d.getUTCFullYear() + Math.floor(target / 12);
+  const month = ((target % 12) + 12) % 12;
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(year, month, Math.min(d.getUTCDate(), lastDay)));
+};
+const periodAmountOf = (a) => (a.frequency === 'quarterly'
+  ? (a.monthly != null ? a.monthly * 3 : a.annual / 4)
+  : a.frequency === 'annual' ? a.annual : a.monthly);
+const horizon = addMonthsClamped(dayStart(new Date()), 12);
+const verification = [];
+let violations = 0;
+for (const a of agreements) {
+  if (a.status !== 'Active' || a.frequency === 'custom' || !a.firstDue) continue;
+  const step = a.frequency === 'monthly' ? 1 : a.frequency === 'quarterly' ? 3 : 12;
+  const anchor = dayStart(new Date(a.firstDue + 'T00:00:00Z'));
+  const expected = [];
+  for (let i = 0; ; i += 1) {
+    const d = addMonthsClamped(anchor, i * step);
+    if (d > horizon) break;
+    expected.push(d.toISOString().slice(0, 10));
+  }
+  const expectedSet = new Set(expected);
+  const rows = after.filter((p) => String(p.agreementId) === String(agIdMap.get(a.id)));
+  const rowDates = rows.map((p) => p.dueDate.toISOString().slice(0, 10));
+  const offCadence = rowDates.filter((d) => !expectedSet.has(d));
+  const missing = expected.filter((d) => !rowDates.includes(d));
+  const amount = periodAmountOf(a);
+  const wrongAmount = rows.filter((p) => Math.abs(p.amount - amount) > 0.005).map((p) => `${p.dueDate.toISOString().slice(0, 10)}:${p.amount}`);
+  const gaps = rowDates.sort().slice(1).map((d, i) => (new Date(d) - new Date(rowDates[i])) / 86400000);
+  const badGap = gaps.filter((g) => g < step * 28 || g > step * 31);
+  const ok = !offCadence.length && !missing.length && !wrongAmount.length && !badGap.length;
+  if (!ok) violations += 1;
+  verification.push({
+    agreement: `${a.branch} (${a.frequency})`, rows: rows.length, expected: expected.length,
+    offCadence, missing, wrongAmount, badGap, ok,
+  });
+}
+
 console.log(JSON.stringify({
   before: before.length,
   after: after.length,
@@ -112,6 +157,9 @@ console.log(JSON.stringify({
   openRemindersAfterRun: reminders.filter((r) => r.status === 'Open').length,
   reminderSubjects: reminders.map((r) => r.dueDate ? r.dueDate.toISOString().slice(0, 10) : 'series'),
   perAgreement: perAg,
+  cadenceViolations: violations,
+  verification: verification.filter((v) => !v.ok),
+  verifiedAgreements: verification.length,
 }, null, 2));
 
 await mongoose.disconnect();
