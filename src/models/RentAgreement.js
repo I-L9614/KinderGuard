@@ -15,6 +15,10 @@ const rentAgreementSchema = new mongoose.Schema({
   // Amounts may be absent until the user supplies them: null means "not set
   // yet", never zero and never paid. No payments are scheduled while null.
   monthlyAmount: { type: Number, min: 0, default: null },
+  // Editable figure for one quarterly payment. Defaults to monthlyAmount x 3
+  // in the controller, but stays an independent stored value so an agreed
+  // quarterly sum is entered directly instead of drifting on monthly x 3.
+  quarterlyAmount: { type: Number, min: 0, default: null },
   // Editable figure shown as the agreement's yearly total. Defaults to
   // monthlyAmount x 12 in the controller, but stays an independent stored
   // value so partial-year or variable agreements are not forced into x12.

@@ -18,6 +18,9 @@ window.__updateGuard = updateGuard;
 const state = { user: null, branches: [], licenses: [], types: [], alerts: [], tasks: [], taskFilter: 'all', taskScope: 'mine', page: 'branches', branchId: null, token: null, cardFilter: null, rent: null, rentAuthorityFilter: null, rentShowAllOverdue: false, rentShowAllUpcoming: false, reportTab: 'branch', reportScope: 'all', reportSelection: '', reportGenerated: false };
 const esc = (value = '') => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const date = (value) => value ? new Date(value).toLocaleDateString('he-IL', { timeZone: 'Asia/Jerusalem' }) : '—';
+// Month arithmetic that clamps to the month end instead of overflowing
+// (Jan 31 + 1 month -> Feb 28, never Mar 3). Mirrors the server scheduler.
+const addMonthsClamped = (d, months) => { const out = new Date(d); const day = out.getDate(); out.setMonth(out.getMonth() + months); if (out.getDate() < day) out.setDate(0); return out; };
 const api = async (url, options = {}) => {
   const headers = { ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}), ...options.headers };
   const method = (options.method || 'GET').toUpperCase();
@@ -561,10 +564,27 @@ const taskForm = (task = null, prefill = null, onSaved = null) => {
 };
 
 // ----- שכירות: מעקב תשלומים לרשויות (תיעוד בלבד, ללא העברת כסף) -----
-const money = (value) => `₪${Number(value || 0).toLocaleString('he-IL')}`;
+const money = (value) => `₪${Number(value || 0).toLocaleString('he-IL', { maximumFractionDigits: 2 })}`;
 const rentFrequencyText = (value) => ({ monthly: 'חודשי', quarterly: 'רבעוני', annual: 'שנתי', custom: 'מועדים מותאמים' }[value] || value);
 const rentMethodText = (value) => ({ cheque: "צ'ק", transfer: 'העברה בנקאית' }[value] || value);
 const rentStatusPill = (status) => ({ Pending: ['neutral', 'ממתין'], Handed: ['warning', "צ'ק נמסר · טרם נפרע"], Cleared: ['good', 'נפרע'], Cancelled: ['neutral', 'בוטל'] }[status] || ['neutral', status]);
+// Amount shown on an agreement row follows its frequency: the actual payment
+// sum per cadence (yearly for annual, quarterly for quarterly, monthly
+// otherwise). For non-monthly cadences a monthly equivalent is shown below,
+// explicitly labeled as display-only - the actual payment stays quarterly or
+// annual.
+const rentPeriodAmountCell = (agreement) => {
+  if (agreement.frequency === 'annual' && agreement.annualAmount != null) {
+    return `${money(agreement.annualAmount)} / שנה<br><small class="muted">≈ ${money(agreement.annualAmount / 12)} / חודש · לתצוגה בלבד, התשלום שנתי</small>`;
+  }
+  if (agreement.frequency === 'quarterly') {
+    const quarterly = agreement.quarterlyAmount ?? (agreement.monthlyAmount != null ? agreement.monthlyAmount * 3 : (agreement.annualAmount != null ? agreement.annualAmount / 4 : null));
+    if (quarterly != null) return `${money(quarterly)} / רבעון<br><small class="muted">≈ ${money(quarterly / 3)} / חודש · לתצוגה בלבד, התשלום רבעוני</small>`;
+  }
+  if (agreement.monthlyAmount != null) return `${money(agreement.monthlyAmount)} / חודש`;
+  if (agreement.annualAmount != null) return `${money(agreement.annualAmount)} / שנה`;
+  return 'טרם הוזן';
+};
 
 const openRentDoc = async (agreementId, docId) => {
   try {
@@ -637,7 +657,10 @@ const renderRent = async () => {
   const paymentRow = (p) => { const [cls, txt] = rentStatusPill(p.status); return `<article class="license-row" data-payment-id="${p._id}"><div class="license-icon ${p.status === 'Handed' ? 'warning' : ''}">${p.method === 'cheque' ? '✎' : '⇄'}</div><div class="license-main"><strong>${esc(p.branchName)}</strong><small>${esc(p.authorityName)} · ${rentMethodText(p.method)} · פרעון ${date(p.dueDate)}</small></div><span class="amount-cell">${money(p.amount)}</span><span class="status-pill ${cls}">${txt}</span>${p.method === 'cheque' && p.status === 'Pending' ? `<button class="text-button" data-rent-handed="${p._id}">סמן כנמסר</button>` : ''}<button class="text-button" data-rent-cleared="${p._id}">סמן כנפרע</button></article>`; };
   const visibleList = (list, stateKey) => (state[stateKey] ? list : list.slice(0, LIST_LIMIT));
   const moreButton = (list, stateKey) => (list.length > LIST_LIMIT ? `<button class="secondary small-btn full" data-rent-more="${stateKey}">${state[stateKey] ? `הצגת ${LIST_LIMIT} הראשונים בלבד` : `הצגת כל ${list.length} התשלומים`}</button>` : '');
-  const annualTotal = active.reduce((sum, a) => sum + (a.annualAmount || 0), 0);
+  // Yearly figure per agreement for the annual stat card: stored yearly sum,
+  // or derived from the cadence's own amount when only that exists.
+  const annualFigure = (a) => a.annualAmount ?? (a.monthlyAmount != null ? a.monthlyAmount * 12 : (a.quarterlyAmount != null ? a.quarterlyAmount * 4 : 0));
+  const annualTotal = active.reduce((sum, a) => sum + annualFigure(a), 0);
   const rentAlerts = currentAlerts().filter((a) => a.kind === 'Rent').length;
   const filterId = state.rentAuthorityFilter || '';
   const visibleAuthorities = authorities.filter((a) => !filterId || a._id === filterId);
@@ -648,8 +671,8 @@ const renderRent = async () => {
     const series = agreement.chequeSeries?.seriesEndDate ? ` · הסדרה מסתיימת ${date(agreement.chequeSeries.seriesEndDate)}` : '';
     return `<article class="license-row">
       <div class="license-icon ${next ? (next.status === 'Handed' ? 'warning' : '') : ''}">${agreement.paymentMethod === 'cheque' ? '✎' : '⇄'}</div>
-      <div class="license-main"><strong>${esc(agreement.branchId?.name || 'סניף')}${agreement.branchId?.kind === 'property' ? ' <span class="muted">(משרד)</span>' : ''}${agreement.direction === 'incoming' ? ' <span class="muted">(הגוף משלם לנו)</span>' : ''}</strong><small>${agreement.frequency ? `${rentFrequencyText(agreement.frequency)} · ${rentMethodText(agreement.paymentMethod)} · ` : ''}${next ? `פרעון הבא ${date(next.dueDate)} · ${money(next.amount)}` : (agreement.monthlyAmount == null ? 'הסכום והמועדים יוזנו בהמשך' : 'אין מועד קרוב')}${series}</small></div>
-      <span class="amount-cell">${agreement.monthlyAmount != null ? `${money(agreement.monthlyAmount)} / חודש` : 'טרם הוזן'}</span>
+      <div class="license-main"><strong>${esc(agreement.branchId?.name || 'סניף')}${agreement.branchId?.kind === 'property' ? ' <span class="muted">(משרד)</span>' : ''}${agreement.direction === 'incoming' ? ' <span class="muted">(הגוף משלם לנו)</span>' : ''}</strong><small>${agreement.frequency ? `${rentFrequencyText(agreement.frequency)} · ${rentMethodText(agreement.paymentMethod)} · ` : ''}${next ? `פרעון הבא ${date(next.dueDate)} · ${money(next.amount)}` : (agreement.monthlyAmount == null && agreement.annualAmount == null && agreement.quarterlyAmount == null ? 'הסכום והמועדים יוזנו בהמשך' : 'אין מועד קרוב')}${series}</small></div>
+      <span class="amount-cell">${rentPeriodAmountCell(agreement)}</span>
       <span class="status-pill ${pillClass}">${pillText}</span>
       ${next && agreement.paymentMethod === 'cheque' && next.status === 'Pending' ? `<button class="text-button" data-rent-handed="${next._id}">סמן כנמסר</button>` : ''}
       ${next ? `<button class="text-button" data-rent-cleared="${next._id}">סמן כנפרע</button>` : ''}
@@ -662,7 +685,7 @@ const renderRent = async () => {
   const authorityPanel = (authority) => {
     const list = active.filter((a) => String(a.authorityId?._id || a.authorityId) === authority._id);
     const total = totals[authority._id] || { monthly: 0, annual: 0 };
-    return `<section class="panel"><div class="section-heading"><div><h3>${esc(authority.name)}${authority.type === 'private' ? ' <small class="muted">(פרטי)</small>' : ''}</h3><p>${list.length} הסכמים פעילים</p></div><span class="authority-total">סה״כ לרשות: ${money(total.monthly)} לחודש · ${money(total.annual)} לשנה</span></div>${list.length ? `<div class="license-list">${list.map(agreementRow).join('')}</div>` : '<div class="empty-state small"><span>₪</span><h3>אין הסכמים פעילים ברשות</h3><p>הוסיפו הסכם שכירות כדי להתחיל לעקוב.</p></div>'}</section>`;
+    return `<section class="panel"><div class="section-heading"><div><h3>${esc(authority.name)}${authority.type === 'private' ? ' <small class="muted">(פרטי)</small>' : ''}</h3><p>${list.length} הסכמים פעילים</p></div><span class="authority-total" title="הסכום החודשי כולל חלוקת תשלומים רבעוניים ושנתיים לחודשים - לתצוגה בלבד, התשלום בפועל לפי התדירות של כל הסכם">סה״כ לרשות: ${money(total.monthly)} לחודש · ${money(total.annual)} לשנה</span></div>${list.length ? `<div class="license-list">${list.map(agreementRow).join('')}</div>` : '<div class="empty-state small"><span>₪</span><h3>אין הסכמים פעילים ברשות</h3><p>הוסיפו הסכם שכירות כדי להתחיל לעקוב.</p></div>'}</section>`;
   };
   app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">תשלומי שכירות</div><h2>שכירות לרשויות</h2><p>מעקב תשלומי שכר דירה למועצות ולגופים פרטיים לפי מעון. תיעוד בלבד, ללא העברת כסף בפועל.</p></div><div class="button-row"><button class="secondary" id="newAuthority">＋ גוף לתשלום</button><button class="secondary" id="newGroup">₪ תשלום מרוכז</button><button class="primary" id="newAgreement">＋ הסכם שכירות</button></div></section>
   <section class="stats-grid"><article class="stat-card clickable" id="rentAnnualCard" role="button" tabindex="0" title="מעבר לרשויות וההסכמים"><span class="stat-icon teal">₪</span><div><strong>${money(annualTotal)}</strong><small>סה״כ שנתי, כל הרשויות</small></div></article><article class="stat-card clickable" id="rentUpcomingCard" role="button" tabindex="0" title="מעבר לתשלומים הקרובים"><span class="stat-icon amber">${upcoming.length}</span><div><strong>תשלומים קרובים</strong><small>מהיום ו־30 יום קדימה</small></div></article><article class="stat-card clickable" id="rentChecksCard" role="button" tabindex="0" title="רשימת הצ'קים שהופקדו"><span class="stat-icon blue">${handedCount}</span><div><strong>צ'קים מופקדים</strong><small>נמסרו, טרם נפרעו</small></div></article><article class="stat-card clickable" id="rentAlertsCard" role="button" tabindex="0" title="מעבר להתראות השכירות"><span class="stat-icon coral">${rentAlerts}</span><div><strong>תזכורות פעילות</strong><small>מועדי תשלום וסדרות צ'קים</small></div></article></section>
@@ -780,26 +803,66 @@ const rentAgreementForm = () => {
     <div class="two-col"><label>מעון / משרד<select name="branchId">${state.branches.map((b) => `<option value="${b._id}">${esc(b.name)}${b.kind === 'property' ? ' (משרד)' : ''}</option>`).join('')}</select></label>
     <label>מקבל התשלום<select name="authorityId">${authorities.map((a) => `<option value="${a._id}">${esc(a.name)}</option>`).join('')}</select></label></div>
     <label>כיוון התשלום<select name="direction"><option value="outgoing">אנחנו משלמים לגוף (שכירות)</option><option value="incoming">הגוף משלם לנו</option></select></label>
-    <div class="two-col"><label>סכום חודשי (₪)<input name="monthlyAmount" type="number" min="0" step="0.01" placeholder="יוזן בהמשך"></label>
-    <label>סכום שנתי (₪)<input name="annualAmount" type="number" min="0" step="0.01" placeholder="ברירת מחדל: חודשי × 12"><small class="muted">אפשר לשנות - למשל בהסכם לחלק משנה</small></label></div>
     <div class="two-col"><label>תדירות תשלום<select name="frequency"><option value="monthly">חודשי</option><option value="quarterly">רבעוני</option><option value="annual">שנתי</option><option value="custom">מועדים מותאמים</option></select></label>
     <label>אמצעי תשלום<select name="paymentMethod"><option value="cheque">צ'ק</option><option value="transfer">העברה בנקאית</option></select></label></div>
+    <div id="monthlyWrap"><label>סכום חודשי (₪)<input name="monthlyAmount" type="number" min="0" step="0.01" placeholder="יוזן בהמשך"><small class="muted">התשלום בפועל חודשי - תשלום אחד בכל חודש</small></label></div>
+    <div id="quarterlyWrap" hidden><label>סכום רבעוני (₪)<input name="quarterlyAmount" type="number" min="0" step="0.01" placeholder="יוזן בהמשך"><small class="muted">התשלום בפועל רבעוני - תשלום אחד בכל 3 חודשים. לתצוגה בלבד יוצג גם שווה־ערך חודשי (רבעוני ÷ 3)</small></label></div>
+    <div id="annualWrap" hidden><label>סכום שנתי (₪)<input name="annualAmount" type="number" min="0" step="0.01" placeholder="יוזן בהמשך"><small class="muted">התשלום בפועל שנתי - תשלום אחד בשנה. לתצוגה בלבד יוצג גם שווה־ערך חודשי (שנתי ÷ 12)</small></label></div>
     <label>תאריך פרעון ראשון<input name="firstDueDate" type="date"><small class="muted">נדרש רק אחרי שמוזן סכום</small></label>
     <div id="customDatesWrap" hidden><label>מועדי פרעון מותאמים</label><div id="customDates"><input type="date" name="customDate"></div><button type="button" class="secondary small-btn" id="addCustomDate">＋ מועד נוסף</button></div>
-    <fieldset id="seriesWrap"><legend class="check-row"><input type="checkbox" name="hasSeries"> הופקדה סדרת צ'קים מראש</legend><div id="seriesFields" hidden><div class="two-col"><label>מספר צ'קים בסדרה<input name="depositedCount" type="number" min="1"></label><label>תאריך סיום הסדרה<input name="seriesEndDate" type="date"></label></div><p class="muted">חודש לפני סיום הסדרה תופיע תזכורת להנפיק סדרה חדשה.</p></div></fieldset>
+    <fieldset id="seriesWrap"><legend class="check-row"><input type="checkbox" name="hasSeries"> הופקדה סדרת צ'קים מראש</legend><div id="seriesFields" hidden><div class="two-col"><label>מספר צ'קים בסדרה<input name="depositedCount" type="number" min="1"></label><label>תאריך סיום הסדרה<input name="seriesEndDate" type="date"></label></div><p class="muted">סדרה מלאה מכסה שנה: 12 צ'קים בתדירות חודשית, 4 ברבעונית, 1 בשנתית. הפקדת הסדרה לא מסמנת תשלום כנפרע - כל צ'ק מסומן בפועל בנפרד. חודש לפני סיום הסדרה תופיע תזכורת להנפיק סדרה חדשה.</p></div></fieldset>
     <button class="primary">שמירת הסכם</button></form>`);
   const form = m.wrap.querySelector('form');
-  form.elements.frequency.onchange = () => { m.wrap.querySelector('#customDatesWrap').hidden = form.elements.frequency.value !== 'custom'; };
-  form.elements.hasSeries.onchange = () => { m.wrap.querySelector('#seriesFields').hidden = !form.elements.hasSeries.checked; };
+  // The frequency chooses the single visible amount input: monthly shows the
+  // monthly sum, quarterly the quarterly sum, annual the yearly sum. Custom
+  // dates are priced per payment with the monthly field.
+  const syncAmountField = () => {
+    const freq = form.elements.frequency.value;
+    m.wrap.querySelector('#monthlyWrap').hidden = !(freq === 'monthly' || freq === 'custom');
+    m.wrap.querySelector('#quarterlyWrap').hidden = freq !== 'quarterly';
+    m.wrap.querySelector('#annualWrap').hidden = freq !== 'annual';
+    m.wrap.querySelector('#customDatesWrap').hidden = freq !== 'custom';
+  };
+  form.elements.frequency.onchange = () => { syncAmountField(); applySeriesDefaults(); };
+  syncAmountField();
+  // A deposited cheque series covers one year of the agreement's cadence:
+  // 12 monthly cheques, 4 quarterly, 1 annual. The count and the end date
+  // (due date of the year's last cheque) prefill from the frequency and
+  // first due date, and stay editable; a manual entry is never overwritten.
+  const SERIES_YEAR_COUNT = { monthly: 12, quarterly: 4, annual: 1 };
+  const SERIES_STEP_MONTHS = { monthly: 1, quarterly: 3, annual: 12 };
+  const seriesDirty = { count: false, end: false };
+  form.elements.depositedCount.addEventListener('input', () => { seriesDirty.count = true; });
+  form.elements.seriesEndDate.addEventListener('input', () => { seriesDirty.end = true; });
+  function applySeriesDefaults() {
+    const freq = form.elements.frequency.value;
+    const count = SERIES_YEAR_COUNT[freq];
+    if (count == null) return; // custom dates keep a fully manual series
+    if (!seriesDirty.count) form.elements.depositedCount.value = count;
+    const first = form.elements.firstDueDate.value;
+    if (!seriesDirty.end && first) {
+      const end = addMonthsClamped(new Date(`${first}T00:00:00`), (count - 1) * SERIES_STEP_MONTHS[freq]);
+      form.elements.seriesEndDate.value = `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, '0')}-${String(end.getDate()).padStart(2, '0')}`;
+    }
+  }
+  form.elements.firstDueDate.addEventListener('change', applySeriesDefaults);
+  form.elements.hasSeries.onchange = () => { m.wrap.querySelector('#seriesFields').hidden = !form.elements.hasSeries.checked; if (form.elements.hasSeries.checked) applySeriesDefaults(); };
   m.wrap.querySelector('#addCustomDate').onclick = () => { const input = document.createElement('input'); input.type = 'date'; input.name = 'customDate'; m.wrap.querySelector('#customDates').append(input); };
   form.onsubmit = async (e) => {
     e.preventDefault(); const f = new FormData(form);
+    const freq = f.get('frequency');
+    // Only the amount field of the chosen frequency is sent, so each cadence
+    // is recorded exactly as entered. The server derives yearly/quarterly
+    // equivalents from it for totals and display convenience only.
+    const visibleAmount = { monthly: 'monthlyAmount', custom: 'monthlyAmount', quarterly: 'quarterlyAmount', annual: 'annualAmount' }[freq];
     const body = {
       branchId: f.get('branchId'), authorityId: f.get('authorityId'), direction: f.get('direction'),
-      monthlyAmount: f.get('monthlyAmount') || undefined, annualAmount: f.get('annualAmount') || undefined,
-      frequency: f.get('frequency'), paymentMethod: f.get('paymentMethod'), firstDueDate: f.get('firstDueDate') || undefined,
+      monthlyAmount: visibleAmount === 'monthlyAmount' ? f.get('monthlyAmount') || undefined : undefined,
+      annualAmount: visibleAmount === 'annualAmount' ? f.get('annualAmount') || undefined : undefined,
+      quarterlyAmount: visibleAmount === 'quarterlyAmount' ? f.get('quarterlyAmount') || undefined : undefined,
+      frequency: freq, paymentMethod: f.get('paymentMethod'), firstDueDate: f.get('firstDueDate') || undefined,
     };
-    if (!body.monthlyAmount) { body.frequency = undefined; body.paymentMethod = undefined; }
+    if (!body.monthlyAmount && !body.annualAmount && !body.quarterlyAmount) { body.frequency = undefined; body.paymentMethod = undefined; }
     if (body.frequency === 'custom') body.customDueDates = f.getAll('customDate').filter(Boolean);
     if (f.get('hasSeries')) body.chequeSeries = { depositedCount: f.get('depositedCount'), seriesEndDate: f.get('seriesEndDate') };
     try { await api('/api/rent/agreements', { method: 'POST', body: JSON.stringify(body) }); m.close(); toast('הסכם השכירות נשמר ומועדי התשלום נוצרו', 'success'); await loadApp(); await renderRent(); } catch (error) { toast(error.message, 'danger'); }
@@ -808,7 +871,18 @@ const rentAgreementForm = () => {
 
 const rentSeriesForm = (agreement) => {
   const series = agreement.chequeSeries || {};
-  const m = modal(`סדרת צ'קים מופקדת · ${esc(agreement.branchId?.name || 'סניף')}`, `<form id="seriesForm" class="form-grid"><p class="muted">עדכנו כשמפקידים סדרה חדשה. התזכורת תופיע שוב חודש לפני סיום הסדרה החדשה.</p><div class="two-col"><label>מספר צ'קים בסדרה<input name="depositedCount" type="number" min="1" value="${series.depositedCount || ''}"></label><label>תאריך סיום הסדרה<input name="seriesEndDate" type="date" value="${series.seriesEndDate ? new Date(series.seriesEndDate).toISOString().slice(0, 10) : ''}" required></label></div><button class="primary">שמירת סדרה</button></form>`);
+  // A full series covers one year of the agreement's cadence: 12 monthly
+  // cheques, 4 quarterly, 1 annual. The suggested end date is the due date
+  // of that year's last upcoming cheque; both stay editable.
+  const yearCount = { monthly: 12, quarterly: 4, annual: 1 }[agreement.frequency];
+  const upcoming = (state.rent?.payments || [])
+    .filter((p) => String(p.agreementId) === String(agreement._id) && ['Pending', 'Handed'].includes(p.status))
+    .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+  const suggestedEnd = yearCount && upcoming.length ? new Date(upcoming[Math.min(yearCount, upcoming.length) - 1].dueDate).toISOString().slice(0, 10) : '';
+  const countValue = series.depositedCount || yearCount || '';
+  const endValue = series.seriesEndDate ? new Date(series.seriesEndDate).toISOString().slice(0, 10) : suggestedEnd;
+  const cadenceNote = yearCount ? `סדרה מלאה בתדירות ${rentFrequencyText(agreement.frequency)} מכסה שנה: ${yearCount} צ'קים.` : '';
+  const m = modal(`סדרת צ'קים מופקדת · ${esc(agreement.branchId?.name || 'סניף')}`, `<form id="seriesForm" class="form-grid"><p class="muted">עדכנו כשמפקידים סדרה חדשה. ${cadenceNote} ההפקדה לא מסמנת תשלומים כנפרעו - כל צ'ק מסומן בפועל בנפרד. התזכורת תופיע שוב חודש לפני סיום הסדרה החדשה.</p><div class="two-col"><label>מספר צ'קים בסדרה<input name="depositedCount" type="number" min="1" value="${countValue}"></label><label>תאריך סיום הסדרה<input name="seriesEndDate" type="date" value="${endValue}" required></label></div><button class="primary">שמירת סדרה</button></form>`);
   m.wrap.querySelector('form').onsubmit = async (e) => { e.preventDefault(); const f = new FormData(e.currentTarget); try { await api(`/api/rent/agreements/${agreement._id}`, { method: 'PATCH', body: JSON.stringify({ chequeSeries: { depositedCount: f.get('depositedCount'), seriesEndDate: f.get('seriesEndDate') } }) }); m.close(); toast('סדרת הצ\'קים עודכנה', 'success'); await loadApp(); await renderRent(); } catch (error) { toast(error.message, 'danger'); } };
 };
 
