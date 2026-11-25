@@ -13,28 +13,43 @@ import { ALLOWED_UPLOAD_MIME, matchesDeclaredType } from '../utils/uploadTypes.j
 // Calendar days are UTC-midnight dates; "today" is the Israel date, not the server's.
 const dayStart = (value) => (value === undefined ? israelToday() : calendarDay(value));
 const dayEnd = (value) => new Date(dayStart(value).getTime() + 86400000 - 1);
-const addMonths = (value, months) => { const d = new Date(value); d.setUTCMonth(d.getUTCMonth() + months); return d; };
+// Adding months keeps the anchor day-of-month, clamping to the month's last
+// day instead of overflowing into the next one (Jan 31 -> Feb 28 -> Mar 31,
+// never Jan 31 -> Mar 3). Dates are UTC-midnight calendar days.
+const addMonths = (value, months) => {
+  const d = new Date(value);
+  const target = d.getUTCMonth() + months;
+  const year = d.getUTCFullYear() + Math.floor(target / 12);
+  const month = ((target % 12) + 12) % 12;
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(year, month, Math.min(d.getUTCDate(), lastDay)));
+};
 const DAYS = 86400000;
-// Payments are materialized this far ahead so reminders always have rows.
-const SCHEDULE_HORIZON_MONTHS = 4;
+// Payments are materialized this far ahead: a full year, so a monthly
+// agreement shows its 12 cheques and a quarterly one its 4 from day one, and
+// the hourly maintenance keeps the window sliding forward.
+const SCHEDULE_HORIZON_MONTHS = 12;
 const WEEK_BEFORE_DAYS = 7;
 const MONTH_BEFORE_DAYS = 30;
 
 const validDate = (value) => value && !Number.isNaN(new Date(value).getTime());
 
-// Due amount per scheduled payment: quarterly pays 3 months, annual pays the
-// stored yearly figure, monthly and custom pay the monthly amount.
-const periodAmount = (agreement) => (agreement.frequency === 'quarterly' ? agreement.monthlyAmount * 3
+// Due amount per scheduled payment: quarterly pays its stored quarterly
+// figure (default monthly x 3), annual pays the stored yearly figure, monthly
+// and custom pay the monthly amount. Null when the agreement has no amount
+// that fits its frequency yet.
+const periodAmount = (agreement) => (agreement.frequency === 'quarterly'
+  ? (agreement.quarterlyAmount ?? (agreement.monthlyAmount != null ? agreement.monthlyAmount * 3 : (agreement.annualAmount != null ? agreement.annualAmount / 4 : null)))
   : agreement.frequency === 'annual' ? agreement.annualAmount
     : agreement.monthlyAmount);
 
-// Materializes scheduled payments for one agreement, idempotently (the
-// {agreementId, dueDate} unique key makes re-runs no-ops for existing rows).
-export const scheduleRentPayments = async (agreement) => {
-  if (agreement.status !== 'Active') return 0;
-  // No amount or no schedule yet: the agreement is a record only, so nothing
-  // is materialized (a missing amount is never scheduled as zero).
-  if (agreement.monthlyAmount == null || !agreement.firstDueDate) return 0;
+// Every due date the agreement's schedule should currently cover: its cadence
+// from the anchor (or its custom dates) out to the 12-month horizon. Empty for
+// record-only agreements (no first due date, or no amount that fits the
+// frequency) - they materialize nothing, never a zero payment.
+const scheduledDueDates = (agreement) => {
+  if (agreement.status !== 'Active' || !agreement.firstDueDate) return [];
+  if (periodAmount(agreement) == null) return [];
   const horizon = addMonths(dayStart(), SCHEDULE_HORIZON_MONTHS);
   const dates = [];
   if (agreement.frequency === 'custom') {
@@ -42,10 +57,26 @@ export const scheduleRentPayments = async (agreement) => {
       const date = dayStart(d);
       if (date <= horizon) dates.push(date);
     }
-  } else {
-    const step = agreement.frequency === 'monthly' ? 1 : agreement.frequency === 'quarterly' ? 3 : 12;
-    for (let d = dayStart(agreement.firstDueDate); d <= horizon; d = addMonths(d, step)) dates.push(new Date(d));
+    return dates;
   }
+  const step = agreement.frequency === 'monthly' ? 1 : agreement.frequency === 'quarterly' ? 3 : 12;
+  // Every date is computed from the anchor (first due date), not from the
+  // previous date, so clamped month-ends never drift cumulatively.
+  const anchor = dayStart(agreement.firstDueDate);
+  for (let i = 0; ; i += 1) {
+    const d = addMonths(anchor, i * step);
+    if (d > horizon) break;
+    dates.push(d);
+  }
+  return dates;
+};
+
+// Materializes scheduled payments for one agreement, idempotently (the
+// {agreementId, dueDate} unique key makes re-runs no-ops for existing rows).
+export const scheduleRentPayments = async (agreement) => {
+  const dates = scheduledDueDates(agreement);
+  if (!dates.length) return 0;
+  const amount = periodAmount(agreement);
   const branch = await Branch.findById(agreement.branchId).select('name');
   const authority = await Authority.findById(agreement.authorityId).select('name');
   let created = 0;
@@ -60,7 +91,7 @@ export const scheduleRentPayments = async (agreement) => {
           branchName: branch?.name || '',
           authorityName: authority?.name || '',
           dueDate,
-          amount: periodAmount(agreement),
+          amount,
           method: agreement.paymentMethod,
           status: 'Pending',
         },
@@ -175,24 +206,36 @@ export const deleteAuthority = async (req, res) => {
 
 const validateAgreementInput = async (req, res) => {
   const adminId = getAdminId(req.user);
-  const { branchId, authorityId, monthlyAmount, annualAmount, frequency, firstDueDate, paymentMethod } = req.body;
+  const { branchId, authorityId, monthlyAmount, quarterlyAmount, annualAmount, frequency, firstDueDate, paymentMethod } = req.body;
   // Amounts are optional: the user adds them later. A missing amount is
   // stored as null (never zero) and no payment schedule is materialized.
   const hasMonthly = monthlyAmount !== undefined && monthlyAmount !== null && monthlyAmount !== '';
   const monthly = hasMonthly ? Number(monthlyAmount) : null;
   if (hasMonthly && !(monthly > 0)) { res.status(400).json({ message: 'יש להזין סכום חודשי חיובי' }); return null; }
+  const hasQuarterly = quarterlyAmount !== undefined && quarterlyAmount !== null && quarterlyAmount !== '';
+  const quarterlyInput = hasQuarterly ? Number(quarterlyAmount) : null;
+  if (hasQuarterly && !(quarterlyInput >= 0)) { res.status(400).json({ message: 'הסכום הרבעוני אינו תקין' }); return null; }
   const hasAnnual = annualAmount !== undefined && annualAmount !== null && annualAmount !== '';
   const annual = hasAnnual ? Number(annualAmount) : (monthly != null ? monthly * 12 : null);
   if (hasAnnual && !(annual >= 0)) { res.status(400).json({ message: 'הסכום השנתי אינו תקין' }); return null; }
+  // The quarterly figure defaults to monthly x 3, or a quarter of the yearly
+  // figure when only that exists; it stays independently editable so an
+  // agreed quarterly sum does not drift on monthly x 3 rounding.
+  const quarterly = quarterlyInput ?? (monthly != null ? monthly * 3 : (annual != null ? annual / 4 : null));
   // Schedule fields are required once an amount exists; without an amount
   // they stay unset so nothing invented is displayed or scheduled.
-  if (monthly != null || frequency) {
+  const hasAnyAmount = monthly != null || quarterly != null || annual != null;
+  if (hasAnyAmount || frequency) {
     if (!['monthly', 'quarterly', 'annual', 'custom'].includes(frequency)) { res.status(400).json({ message: 'תדירות התשלום אינה תקינה' }); return null; }
   }
-  if (monthly != null || paymentMethod) {
+  if (hasAnyAmount || paymentMethod) {
     if (!['cheque', 'transfer'].includes(paymentMethod)) { res.status(400).json({ message: 'אמצעי התשלום אינו תקין' }); return null; }
   }
-  if (monthly != null && !validDate(firstDueDate)) { res.status(400).json({ message: 'יש להזין תאריך פרעון ראשון תקין' }); return null; }
+  // An annual agreement needs no monthly amount: the yearly figure alone
+  // schedules one payment a year. Monthly and custom need the monthly figure.
+  if (frequency === 'annual' && annual == null) { res.status(400).json({ message: 'בתדירות שנתית יש להזין סכום שנתי או חודשי' }); return null; }
+  if (frequency === 'quarterly' && quarterly == null) { res.status(400).json({ message: 'בתדירות רבעונית יש להזין סכום רבעוני, חודשי או שנתי' }); return null; }
+  if (hasAnyAmount && !validDate(firstDueDate)) { res.status(400).json({ message: 'יש להזין תאריך פרעון ראשון תקין' }); return null; }
   if (firstDueDate && !validDate(firstDueDate)) { res.status(400).json({ message: 'יש להזין תאריך פרעון ראשון תקין' }); return null; }
   const direction = req.body.direction === 'incoming' ? 'incoming' : 'outgoing';
   const branch = await Branch.findOne({ _id: branchId, adminId });
@@ -217,7 +260,7 @@ const validateAgreementInput = async (req, res) => {
       seriesEndDate: dayStart(series.seriesEndDate),
     };
   }
-  return { adminId, branch, authority, monthly, annual, frequency: frequency || null, customDueDates, paymentMethod: paymentMethod || null, firstDueDate: validDate(firstDueDate) ? dayStart(firstDueDate) : null, chequeSeries, direction };
+  return { adminId, branch, authority, monthly, quarterly, annual, frequency: frequency || null, customDueDates, paymentMethod: paymentMethod || null, firstDueDate: validDate(firstDueDate) ? dayStart(firstDueDate) : null, chequeSeries, direction };
 };
 
 export const createAgreement = async (req, res) => {
@@ -229,6 +272,7 @@ export const createAgreement = async (req, res) => {
     authorityId: input.authority._id,
     direction: input.direction,
     monthlyAmount: input.monthly,
+    quarterlyAmount: input.quarterly,
     annualAmount: input.annual,
     frequency: input.frequency,
     firstDueDate: input.firstDueDate,
@@ -327,6 +371,8 @@ export const updateAgreement = async (req, res) => {
   const adminId = getAdminId(req.user);
   const agreement = await RentAgreement.findOne({ _id: req.params.id, adminId });
   if (!agreement) return res.status(404).json({ message: 'הסכם השכירות לא נמצא' });
+  const frequencyBefore = agreement.frequency;
+  const firstDueBefore = agreement.firstDueDate ? dayStart(agreement.firstDueDate).getTime() : null;
   const body = { ...req.body };
   // Keep the stored annual figure independent: it only re-derives from the
   // monthly amount when explicitly sent empty, never silently.
@@ -339,6 +385,7 @@ export const updateAgreement = async (req, res) => {
     if (!(monthly > 0)) return res.status(400).json({ message: 'יש להזין סכום חודשי חיובי' });
     agreement.monthlyAmount = monthly;
     if (body.annualAmount === undefined && agreement.annualAmount == null) agreement.annualAmount = monthly * 12;
+    if (body.quarterlyAmount === undefined && agreement.quarterlyAmount == null) agreement.quarterlyAmount = monthly * 3;
   }
   // Schedule fields become editable here so an amount-less record can be
   // completed later; once an amount exists all three must be present.
@@ -354,13 +401,22 @@ export const updateAgreement = async (req, res) => {
     if (!validDate(body.firstDueDate)) return res.status(400).json({ message: 'יש להזין תאריך פרעון ראשון תקין' });
     agreement.firstDueDate = dayStart(body.firstDueDate);
   }
-  if (agreement.monthlyAmount != null && (!agreement.frequency || !agreement.paymentMethod || !agreement.firstDueDate)) {
-    return res.status(400).json({ message: 'עם סכום חודשי יש להזין גם תדירות, אמצעי תשלום ותאריך פרעון ראשון' });
-  }
   if (body.annualAmount !== undefined && body.annualAmount !== '') {
     const annual = Number(body.annualAmount);
     if (!(annual >= 0)) return res.status(400).json({ message: 'הסכום השנתי אינו תקין' });
     agreement.annualAmount = annual;
+  }
+  if (body.quarterlyAmount !== undefined && body.quarterlyAmount !== '') {
+    const quarterly = Number(body.quarterlyAmount);
+    if (!(quarterly >= 0)) return res.status(400).json({ message: 'הסכום הרבעוני אינו תקין' });
+    agreement.quarterlyAmount = quarterly;
+  }
+  const hasAnyAmount = agreement.monthlyAmount != null || agreement.annualAmount != null || agreement.quarterlyAmount != null;
+  if (hasAnyAmount && (!agreement.frequency || !agreement.paymentMethod || !agreement.firstDueDate)) {
+    return res.status(400).json({ message: 'עם סכום יש להזין גם תדירות, אמצעי תשלום ותאריך פרעון ראשון' });
+  }
+  if (hasAnyAmount && periodAmount(agreement) == null) {
+    return res.status(400).json({ message: 'לתדירות שנבחרה יש להזין סכום מתאים' });
   }
   const series = body.chequeSeries;
   if (series) {
@@ -372,10 +428,81 @@ export const updateAgreement = async (req, res) => {
       seriesEndDate: dayStart(series.seriesEndDate),
     };
   }
+  const amountsChanged = body.monthlyAmount !== undefined || body.annualAmount !== undefined || body.quarterlyAmount !== undefined;
+  const scheduleChanged = agreement.frequency !== frequencyBefore
+    || (agreement.firstDueDate ? agreement.firstDueDate.getTime() : null) !== firstDueBefore;
   await agreement.save();
+  // Reconcile before materializing so removed dates do not block the new
+  // schedule's unique {agreementId, dueDate} rows.
+  if (scheduleChanged) await reconcileScheduleChange(agreement);
   await scheduleRentPayments(agreement);
+  if (amountsChanged || scheduleChanged) await syncPendingPaymentAmounts(agreement);
   await generateDueRentReminders();
   res.json(agreement);
+};
+
+// After the cadence or its anchor (first due date) changes, generated future
+// rows that no longer fit the schedule are removed: only Pending, ungrouped
+// payments the user never edited, due today or later. Each removal is
+// audited so the original row survives in the trail. Past-due rows (even
+// untouched) are real outstanding records and stay; handed, cleared, grouped
+// and manually edited payments never move.
+const reconcileScheduleChange = async (agreement) => {
+  const keep = new Set(scheduledDueDates(agreement).map((d) => d.getTime()));
+  const stale = await RentPayment.find({
+    agreementId: agreement._id,
+    status: 'Pending',
+    groupId: null,
+    lastEditedAt: null,
+    dueDate: { $gte: dayStart() },
+  });
+  let removed = 0;
+  for (const payment of stale) {
+    if (keep.has(payment.dueDate.getTime())) continue;
+    await RentAudit.create({
+      adminId: payment.adminId,
+      action: 'sync_agreement_schedule',
+      paymentId: payment._id,
+      branchName: payment.branchName,
+      authorityName: payment.authorityName,
+      reason: 'תדירות התשלום או מועד הפרעון הראשון של ההסכם עודכנו',
+      before: { status: payment.status, amount: payment.amount, dueDate: payment.dueDate },
+      after: { removed: true },
+    });
+    await payment.deleteOne();
+    removed += 1;
+  }
+  return removed;
+};
+
+// After an agreement's amounts change, its untouched future payments follow
+// the new figure. Only ungrouped Pending payments the user never edited move:
+// handed/cleared cheques, manual corrections and grouped allocations are real
+// obligations and stay exactly as recorded. Each moved payment gets an audit
+// entry so the original amount survives.
+const syncPendingPaymentAmounts = async (agreement) => {
+  const amount = periodAmount(agreement);
+  if (amount == null) return 0;
+  const pending = await RentPayment.find({ agreementId: agreement._id, status: 'Pending', groupId: null, lastEditedAt: null });
+  let synced = 0;
+  for (const payment of pending) {
+    if (payment.amount === amount) continue;
+    const before = { amount: payment.amount, dueDate: payment.dueDate };
+    payment.amount = amount;
+    await payment.save();
+    await RentAudit.create({
+      adminId: payment.adminId,
+      action: 'sync_agreement_amounts',
+      paymentId: payment._id,
+      branchName: payment.branchName,
+      authorityName: payment.authorityName,
+      reason: 'סכום ההסכם עודכן',
+      before,
+      after: { amount: payment.amount, dueDate: payment.dueDate },
+    });
+    synced += 1;
+  }
+  return synced;
 };
 
 // Closing an agreement (by the user or by deletion recovery) cancels only
@@ -464,8 +591,20 @@ export const rentSummary = async (req, res) => {
   for (const agreement of active) {
     const key = String(agreement.authorityId?._id || agreement.authorityId);
     totals[key] = totals[key] || { monthly: 0, annual: 0 };
-    totals[key].monthly += agreement.monthlyAmount || 0;
-    totals[key].annual += agreement.annualAmount || 0;
+    // Normalized figures per frequency: an annual agreement contributes its
+    // yearly sum / 12 to the monthly total (not whatever sits in the monthly
+    // field), a quarterly one its quarterly sum / 3. The yearly total stays
+    // the stored annual figure, derived when absent.
+    const annualFig = agreement.annualAmount ?? (agreement.monthlyAmount != null ? agreement.monthlyAmount * 12 : (agreement.quarterlyAmount != null ? agreement.quarterlyAmount * 4 : 0));
+    const monthlyFig = agreement.frequency === 'annual' ? annualFig / 12
+      : agreement.frequency === 'quarterly' ? ((agreement.quarterlyAmount ?? (agreement.monthlyAmount != null ? agreement.monthlyAmount * 3 : annualFig / 4)) / 3)
+        : (agreement.monthlyAmount ?? annualFig / 12);
+    totals[key].monthly += monthlyFig;
+    totals[key].annual += annualFig;
+  }
+  for (const key of Object.keys(totals)) {
+    totals[key].monthly = Math.round(totals[key].monthly * 100) / 100;
+    totals[key].annual = Math.round(totals[key].annual * 100) / 100;
   }
   res.json({ authorities, agreements, payments, groups, totals });
 };

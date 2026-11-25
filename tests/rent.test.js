@@ -6,6 +6,7 @@ import request from 'supertest';
 import RentAgreement from '../src/models/RentAgreement.js';
 import RentPayment from '../src/models/RentPayment.js';
 import RentReminder from '../src/models/RentReminder.js';
+import RentAudit from '../src/models/RentAudit.js';
 import Branch from '../src/models/Branch.js';
 import { generateDueRentReminders, scheduleRentPayments } from '../src/controllers/rentController.js';
 import { reconcileBranchDeletions } from '../src/services/licenseCleanup.js';
@@ -64,6 +65,194 @@ describe('Rent module', () => {
     expect(res.body.annualAmount).toBe(21000);
     const payments = await RentPayment.find({ agreementId: res.body._id }).sort({ dueDate: 1 });
     expect(payments[0].amount).toBe(10500);
+  });
+
+  it('materializes a full year of cheques: 12 for monthly, 4 for quarterly', async () => {
+    const monthlyRes = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 2000, frequency: 'monthly', paymentMethod: 'cheque', firstDueDate: daysFromNow(5),
+    }).expect(201);
+    expect(await RentPayment.countDocuments({ agreementId: monthlyRes.body._id })).toBe(12);
+    const quarterlyRes = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 3000, frequency: 'quarterly', paymentMethod: 'cheque', firstDueDate: daysFromNow(5),
+    }).expect(201);
+    const quarterlyPayments = await RentPayment.find({ agreementId: quarterlyRes.body._id }).sort({ dueDate: 1 });
+    expect(quarterlyPayments.length).toBeGreaterThanOrEqual(4);
+    expect(quarterlyPayments.length).toBeLessThanOrEqual(5);
+    expect(quarterlyPayments[0].amount).toBe(9000);
+    const gapMonths = (quarterlyPayments[1].dueDate - quarterlyPayments[0].dueDate) / 86400000;
+    expect(gapMonths).toBeGreaterThanOrEqual(89);
+    expect(gapMonths).toBeLessThanOrEqual(92);
+  });
+
+  it('schedules an annual-only agreement with no monthly amount, one payment a year', async () => {
+    const res = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, annualAmount: 60000, frequency: 'annual', paymentMethod: 'transfer', firstDueDate: daysFromNow(15),
+    }).expect(201);
+    expect(res.body.monthlyAmount).toBeNull();
+    const payments = await RentPayment.find({ agreementId: res.body._id }).sort({ dueDate: 1 });
+    expect(payments).toHaveLength(1);
+    expect(payments[0].amount).toBe(60000);
+    // And an annual frequency without any amount is rejected, not stored silent.
+    await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, frequency: 'annual', paymentMethod: 'transfer', firstDueDate: daysFromNow(15),
+    }).expect(400);
+  });
+
+  it('honors an explicit quarterly amount and derives quarterly from annual when only annual exists', async () => {
+    const explicit = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 8333.33, quarterlyAmount: 25000, frequency: 'quarterly', paymentMethod: 'cheque', firstDueDate: daysFromNow(10),
+    }).expect(201);
+    const explicitPayments = await RentPayment.find({ agreementId: explicit.body._id }).sort({ dueDate: 1 });
+    expect(explicitPayments[0].amount).toBe(25000);
+    // Only an annual figure: the quarter is a quarter of it, no monthly x 3 drift.
+    const derived = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, annualAmount: 100000, frequency: 'quarterly', paymentMethod: 'cheque', firstDueDate: daysFromNow(10),
+    }).expect(201);
+    expect(derived.body.monthlyAmount).toBeNull();
+    expect(derived.body.quarterlyAmount).toBe(25000);
+    const derivedPayments = await RentPayment.find({ agreementId: derived.body._id }).sort({ dueDate: 1 });
+    expect(derivedPayments[0].amount).toBe(25000);
+  });
+
+  it('syncs untouched pending payments when agreement amounts change, sparing edited, handed and grouped ones', async () => {
+    const created = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 3000, frequency: 'quarterly', paymentMethod: 'cheque', firstDueDate: daysFromNow(3),
+    }).expect(201);
+    const payments = await RentPayment.find({ agreementId: created.body._id }).sort({ dueDate: 1 });
+    expect(payments[0].amount).toBe(9000);
+    // One payment corrected by hand, one marked as handed: both must survive.
+    await request(app).patch(`/api/rent/payments/${payments[0]._id}`).set(auth()).send({ amount: 9010, dueDate: payments[0].dueDate }).expect(200);
+    await request(app).post(`/api/rent/payments/${payments[1]._id}/handed`).set(auth()).expect(200);
+    await request(app).patch(`/api/rent/agreements/${created.body._id}`).set(auth()).send({ quarterlyAmount: 9500 }).expect(200);
+    const after = await RentPayment.find({ agreementId: created.body._id }).sort({ dueDate: 1 });
+    expect(after[0].amount).toBe(9010); // manual correction wins
+    expect(after[1].amount).toBe(9000); // handed cheque keeps its real amount
+    expect(after[2].amount).toBe(9500); // untouched pending rows follow the agreement
+    const audits = await RentAudit.find({ action: 'sync_agreement_amounts', paymentId: after[2]._id });
+    expect(audits).toHaveLength(1);
+    expect(audits[0].before.amount).toBe(9000);
+    expect(audits[0].after.amount).toBe(9500);
+  });
+
+  it('accepts a quarterly-only agreement: no monthly or annual figure needed', async () => {
+    const res = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, quarterlyAmount: 7500, frequency: 'quarterly', paymentMethod: 'transfer', firstDueDate: daysFromNow(6),
+    }).expect(201);
+    expect(res.body.monthlyAmount).toBeNull();
+    expect(res.body.annualAmount).toBeNull();
+    const payments = await RentPayment.find({ agreementId: res.body._id }).sort({ dueDate: 1 });
+    expect(payments.length).toBeGreaterThanOrEqual(4);
+    expect(payments[0].amount).toBe(7500);
+  });
+
+  it('reconciles the schedule when the frequency changes: stale future rows go, audited; edited and handed rows stay', async () => {
+    const created = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 3000, frequency: 'monthly', paymentMethod: 'cheque', firstDueDate: daysFromNow(3),
+    }).expect(201);
+    const before = await RentPayment.find({ agreementId: created.body._id }).sort({ dueDate: 1 });
+    expect(before.length).toBeGreaterThanOrEqual(12);
+    // One payment corrected by hand, one handed over: both must survive any reconciliation.
+    await request(app).patch(`/api/rent/payments/${before[2]._id}`).set(auth()).send({ amount: 3010, dueDate: before[2].dueDate }).expect(200);
+    await request(app).post(`/api/rent/payments/${before[1]._id}/handed`).set(auth()).expect(200);
+    await request(app).patch(`/api/rent/agreements/${created.body._id}`).set(auth()).send({ frequency: 'quarterly' }).expect(200);
+    const after = await RentPayment.find({ agreementId: created.body._id }).sort({ dueDate: 1 });
+    const pending = after.filter((p) => p.status === 'Pending' && !p.lastEditedAt);
+    // Untouched pending rows now sit exactly on the quarterly cadence (4-5 in the window), at the quarterly amount.
+    expect(pending.length).toBeGreaterThanOrEqual(4);
+    expect(pending.length).toBeLessThanOrEqual(5);
+    for (const p of pending) expect(p.amount).toBe(9000);
+    const gapMonths = (pending[1].dueDate - pending[0].dueDate) / 86400000;
+    expect(gapMonths).toBeGreaterThanOrEqual(89);
+    expect(gapMonths).toBeLessThanOrEqual(92);
+    // The edited row keeps its manual amount and its date off the new cadence; the handed row survives too.
+    const edited = after.find((p) => String(p._id) === String(before[2]._id));
+    expect(edited.amount).toBe(3010);
+    expect(edited.status).toBe('Pending');
+    const handed = after.find((p) => String(p._id) === String(before[1]._id));
+    expect(handed.status).toBe('Handed');
+    // Every removed row left an audit record with its original values.
+    const audits = await RentAudit.find({ action: 'sync_agreement_schedule', paymentId: { $in: before.map((p) => p._id) } });
+    expect(audits.length).toBe(before.length - after.length);
+    expect(audits.length).toBeGreaterThan(0);
+    expect(audits[0].before.status).toBe('Pending');
+    expect(audits[0].after.removed).toBe(true);
+    // Changing back rematerializes the monthly cadence cleanly (no unique-key blockage).
+    await request(app).patch(`/api/rent/agreements/${created.body._id}`).set(auth()).send({ frequency: 'monthly' }).expect(200);
+    const rematerialized = await RentPayment.countDocuments({ agreementId: created.body._id, status: 'Pending' });
+    expect(rematerialized).toBeGreaterThanOrEqual(11);
+  });
+
+  it('reconciles the schedule when the first due date moves', async () => {
+    const created = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 2000, frequency: 'quarterly', paymentMethod: 'cheque', firstDueDate: daysFromNow(10),
+    }).expect(201);
+    const before = await RentPayment.find({ agreementId: created.body._id }).sort({ dueDate: 1 });
+    const oldFirst = before[0].dueDate;
+    await request(app).patch(`/api/rent/agreements/${created.body._id}`).set(auth()).send({ firstDueDate: daysFromNow(20) }).expect(200);
+    const after = await RentPayment.find({ agreementId: created.body._id }).sort({ dueDate: 1 });
+    expect(after.some((p) => p.dueDate.getTime() === oldFirst.getTime())).toBe(false);
+    expect(after.length).toBeGreaterThanOrEqual(4);
+    const audits = await RentAudit.find({ action: 'sync_agreement_schedule', paymentId: { $in: before.map((p) => p._id) } });
+    expect(audits.length).toBe(before.length);
+  });
+
+  it('rejects a frequency change whose amount is missing instead of silently unscheduling', async () => {
+    const created = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, quarterlyAmount: 7500, frequency: 'quarterly', paymentMethod: 'transfer', firstDueDate: daysFromNow(6),
+    }).expect(201);
+    await request(app).patch(`/api/rent/agreements/${created.body._id}`).set(auth()).send({ frequency: 'annual' }).expect(400);
+    const agreement = await RentAgreement.findById(created.body._id);
+    expect(agreement.frequency).toBe('quarterly');
+  });
+
+  it('counts the sliding year window exactly: 12-13 monthly, 4-5 quarterly, 1-2 annual rows', async () => {
+    // First due today: both window ends are inclusive, so each cadence shows
+    // one payment more than the bare per-year count.
+    const today = israelToday();
+    const m = await request(app).post('/api/rent/agreements').set(auth()).send({ branchId, authorityId, monthlyAmount: 100, frequency: 'monthly', paymentMethod: 'cheque', firstDueDate: today }).expect(201);
+    expect(await RentPayment.countDocuments({ agreementId: m.body._id })).toBe(13);
+    const q = await request(app).post('/api/rent/agreements').set(auth()).send({ branchId, authorityId, monthlyAmount: 100, frequency: 'quarterly', paymentMethod: 'cheque', firstDueDate: today }).expect(201);
+    expect(await RentPayment.countDocuments({ agreementId: q.body._id })).toBe(5);
+    const a = await request(app).post('/api/rent/agreements').set(auth()).send({ branchId, authorityId, annualAmount: 1200, frequency: 'annual', paymentMethod: 'transfer', firstDueDate: today }).expect(201);
+    expect(await RentPayment.countDocuments({ agreementId: a.body._id })).toBe(2);
+    // First due tomorrow: exactly his per-year definition - 12, 4 and 1.
+    const tomorrow = daysFromNow(1);
+    const m2 = await request(app).post('/api/rent/agreements').set(auth()).send({ branchId, authorityId, monthlyAmount: 100, frequency: 'monthly', paymentMethod: 'cheque', firstDueDate: tomorrow }).expect(201);
+    expect(await RentPayment.countDocuments({ agreementId: m2.body._id })).toBe(12);
+    const q2 = await request(app).post('/api/rent/agreements').set(auth()).send({ branchId, authorityId, monthlyAmount: 100, frequency: 'quarterly', paymentMethod: 'cheque', firstDueDate: tomorrow }).expect(201);
+    expect(await RentPayment.countDocuments({ agreementId: q2.body._id })).toBe(4);
+    const a2 = await request(app).post('/api/rent/agreements').set(auth()).send({ branchId, authorityId, annualAmount: 1200, frequency: 'annual', paymentMethod: 'transfer', firstDueDate: tomorrow }).expect(201);
+    expect(await RentPayment.countDocuments({ agreementId: a2.body._id })).toBe(1);
+  });
+
+  it('keeps the anchor day on month-end schedules instead of drifting (31st -> 3rd)', async () => {
+    const res = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 500, frequency: 'monthly', paymentMethod: 'cheque', firstDueDate: '2026-01-31',
+    }).expect(201);
+    const payments = await RentPayment.find({ agreementId: res.body._id }).sort({ dueDate: 1 });
+    const iso = payments.map((p) => p.dueDate.toISOString().slice(0, 10));
+    expect(iso).toContain('2027-01-31');
+    expect(iso).toContain('2027-02-28'); // clamped to month end, not Mar 3
+    expect(iso).toContain('2027-03-31'); // back to the anchor day, no cumulative clamp
+    expect(payments.every((p) => new Date(p.dueDate).getUTCDate() >= 28)).toBe(true);
+  });
+
+  it('normalizes authority totals: an annual agreement contributes yearly/12 to the monthly total', async () => {
+    await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 242399.8, annualAmount: 242399.8, frequency: 'annual', paymentMethod: 'cheque', firstDueDate: daysFromNow(10),
+    }).expect(201);
+    const active = await RentAgreement.find({ status: 'Active' });
+    const expected = { monthly: 0, annual: 0 };
+    for (const ag of active) {
+      const annualFig = ag.annualAmount ?? (ag.monthlyAmount != null ? ag.monthlyAmount * 12 : (ag.quarterlyAmount != null ? ag.quarterlyAmount * 4 : 0));
+      expected.annual += annualFig;
+      expected.monthly += ag.frequency === 'annual' ? annualFig / 12
+        : ag.frequency === 'quarterly' ? ((ag.quarterlyAmount ?? ag.monthlyAmount * 3) / 3)
+          : (ag.monthlyAmount ?? annualFig / 12);
+    }
+    const summary = await request(app).get('/api/rent/summary').set(auth()).expect(200);
+    expect(summary.body.totals[authorityId].annual).toBeCloseTo(expected.annual, 2);
+    expect(summary.body.totals[authorityId].monthly).toBeCloseTo(expected.monthly, 2);
   });
 
   it('uses explicit dates for custom frequency and rejects it without dates', async () => {
@@ -202,10 +391,18 @@ describe('Rent module', () => {
     await request(app).get('/api/rent/summary').set({ Authorization: `Bearer ${mgrLogin.body.token}` }).expect(403);
     const summary = await request(app).get('/api/rent/summary').set(auth()).expect(200);
     const active = summary.body.agreements.filter((a) => a.status === 'Active' && String(a.authorityId?._id || a.authorityId) === authorityId);
-    const expectedMonthly = active.reduce((sum, a) => sum + a.monthlyAmount, 0);
-    const expectedAnnual = active.reduce((sum, a) => sum + a.annualAmount, 0);
-    expect(summary.body.totals[authorityId].monthly).toBe(expectedMonthly);
-    expect(summary.body.totals[authorityId].annual).toBe(expectedAnnual);
+    // Normalized per-frequency totals: annual contributes yearly/12 monthly,
+    // quarterly its quarter/3; the yearly total is the stored annual figure.
+    const expected = { monthly: 0, annual: 0 };
+    for (const ag of active) {
+      const annualFig = ag.annualAmount ?? (ag.monthlyAmount != null ? ag.monthlyAmount * 12 : (ag.quarterlyAmount != null ? ag.quarterlyAmount * 4 : 0));
+      expected.annual += annualFig;
+      expected.monthly += ag.frequency === 'annual' ? annualFig / 12
+        : ag.frequency === 'quarterly' ? ((ag.quarterlyAmount ?? ag.monthlyAmount * 3) / 3)
+          : (ag.monthlyAmount ?? annualFig / 12);
+    }
+    expect(summary.body.totals[authorityId].monthly).toBeCloseTo(expected.monthly, 2);
+    expect(summary.body.totals[authorityId].annual).toBeCloseTo(expected.annual, 2);
   });
 
   it('blocks authority deletion while agreements are active and allows it after close', async () => {
@@ -237,7 +434,7 @@ describe('Rent grouped payments, annual frequency and actual-paid reporting', ()
       branchId, authorityId, monthlyAmount: 5000, frequency: 'annual', paymentMethod: 'transfer', firstDueDate: daysFromNow(20),
     }).expect(201);
     const payments = await RentPayment.find({ agreementId: res.body._id }).sort({ dueDate: 1 });
-    expect(payments).toHaveLength(1); // one per year within the 4-month horizon
+    expect(payments).toHaveLength(1); // one per year within the 12-month horizon
     expect(payments[0].amount).toBe(60000);
   });
 
@@ -468,7 +665,6 @@ describe('Rent record corrections with audit trail', () => {
     }).expect(200);
     expect(res.body.amount).toBe(3600);
     expect(res.body.lastEditedAt).not.toBeNull();
-    const RentAudit = (await import('../src/models/RentAudit.js')).default;
     const audit = await RentAudit.findOne({ paymentId: pay._id, action: 'edit_payment' });
     expect(audit.before.amount).toBe(3300);
     expect(audit.after.amount).toBe(3600);
