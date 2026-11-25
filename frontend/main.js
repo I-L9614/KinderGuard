@@ -183,7 +183,10 @@ const renderMobileNav = () => {
   moreButton?.addEventListener('click', () => { sheet.hidden = !sheet.hidden; moreButton.setAttribute('aria-expanded', String(!sheet.hidden)); });
   host.querySelectorAll('[data-mpage]').forEach((button) => button.addEventListener('click', () => { closeSheet(); state.page = button.dataset.mpage; state.branchId = null; render(); window.scrollTo(0, 0); }));
 };
-const render = () => { renderHeader(); if (state.page === 'alerts') return renderAlerts(); if (state.page === 'tasks') return renderTasks(); if (state.page === 'rent') return renderRent(); if (state.page === 'settings') return renderSettings(); if (state.page === 'report') return renderReport(); if (state.branchId) return renderBranch(); return renderBranches(); };
+// A new screen (another page, or another branch) always opens at its top. Refreshes of the same screen keep the scroll position.
+let lastViewKey = null;
+const resetScrollOnViewChange = () => { const key = `${state.page}|${state.branchId || ''}`; if (lastViewKey !== null && key !== lastViewKey) window.scrollTo(0, 0); lastViewKey = key; };
+const render = () => { resetScrollOnViewChange(); renderHeader(); if (state.page === 'alerts') return renderAlerts(); if (state.page === 'tasks') return renderTasks(); if (state.page === 'rent') return renderRent(); if (state.page === 'settings') return renderSettings(); if (state.page === 'report') return renderReport(); if (state.branchId) return renderBranch(); return renderBranches(); };
 
 // Completeness of a daycare branch = the approvals it should hold (every
 // active type defined for all branches plus types defined for this branch)

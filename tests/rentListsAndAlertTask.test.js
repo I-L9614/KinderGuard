@@ -57,6 +57,7 @@ const boot = async (page) => {
       <footer class="footer"></footer>
     </div>`;
   Element.prototype.scrollIntoView = vi.fn();
+  window.scrollTo = vi.fn();
   const stub = makeApiStub();
   fetchCalls = [];
   global.fetch = vi.fn(async (url, options = {}) => {

@@ -43,6 +43,7 @@ describe('renderer boot (real main.js)', () => {
         <footer class="footer"></footer>
       </div>`;
     Element.prototype.scrollIntoView = () => {};
+    window.scrollTo = vi.fn();
     global.fetch = vi.fn(async (url, options = {}) => ({
       ok: true,
       status: 200,
