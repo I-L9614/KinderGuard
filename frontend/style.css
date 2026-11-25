@@ -259,3 +259,32 @@
   .topbar .brand{margin-inline-end:auto}
 }
 .auth-title{margin:0 0 16px;font-size:22px;color:var(--ink)}
+
+/* Rent page on phones: keep every block inside the screen width (no sideways overflow), smaller summary cards, stacked payment rows. */
+@media (max-width:620px){
+  html,body{max-width:100%;overflow-x:hidden}
+  .app-shell,.content,.panel,.welcome-row>div{min-width:0;max-width:100%}
+  .welcome-row{width:100%}
+  .welcome-row p,.section-heading p{overflow-wrap:anywhere}
+  .welcome-row .button-row{width:100%;flex-wrap:wrap}
+  .welcome-row .button-row .primary{order:-1;flex:1 1 100%}
+  .welcome-row .button-row .secondary{flex:1 1 calc(50% - 5px);min-width:0;padding:11px 8px;font-size:13px}
+  .stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .stat-card{display:grid;grid-template-columns:minmax(0,1fr);align-items:start;align-content:start;min-width:0;padding:12px;gap:8px}
+  .stat-card>div{min-width:0}
+  .stat-icon{width:32px;height:32px;border-radius:11px;font-size:15px}
+  .stat-card strong{font-size:18px;letter-spacing:-.3px;overflow-wrap:anywhere}
+  .stat-card small{font-size:11px;margin-top:4px;overflow-wrap:anywhere}
+  .section-heading{flex-wrap:wrap;gap:10px}
+  .section-heading>div{min-width:0;flex:1 1 100%}
+  .section-heading h3{font-size:16px}
+  .section-heading .inbox-total{align-self:flex-start}
+  .stat-card strong{white-space:normal}
+  .license-row:has(.amount-cell){display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
+  .license-row:has(.amount-cell) .license-main{flex:1 1 calc(100% - 56px);min-width:0}
+  .license-row:has(.amount-cell) .amount-cell,.license-row:has(.amount-cell) .status-pill,.license-row:has(.amount-cell) .text-button{grid-column:auto;margin:0;justify-self:auto}
+  .license-row:has(.amount-cell) .amount-cell{margin-inline-start:50px}
+  .license-row:has(.amount-cell) .text-button{padding:6px 8px;min-height:40px}
+  .rent-authority-filter{width:100%}
+  .form-grid .three-col,.three-col{grid-template-columns:1fr}
+}
