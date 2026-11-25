@@ -90,21 +90,12 @@ const openLicenseFile = async (licenseId) => {
 const renderAuth = () => {
   removeMobileNav();
   headerActions.innerHTML = '';
-  app.innerHTML = `<section class="auth-layout"><div class="auth-intro"><div class="eyebrow">ניהול אישורים למעונות יום</div><h2>כל הסניפים.<br>כל האישורים.<br><span>בלי לפספס חידוש.</span></h2><p>מקום אחד לעקוב אחרי אישורים, מועדי פקיעה ומשימות חידוש.</p><div class="auth-decoration"><span>✓</span><span>30 יום</span><span>7 ימים</span><span>יום הפקיעה</span></div></div><div class="panel auth-panel"><div class="tabs"><button class="tab active" data-tab="login">התחברות</button><button class="tab" data-tab="register">פתיחת חשבון מנהל</button></div><form id="authForm"><label>כתובת דוא״ל<input name="email" type="email" autocomplete="username" required></label><label>סיסמה<input name="password" type="password" autocomplete="current-password" minlength="8" required></label><div id="nameField" hidden><label>שם מלא<input name="name" autocomplete="name"></label></div><button class="primary full" type="submit">התחברות</button><p id="authHint" class="muted">התחברו לחשבון KinderGuard שלכם.</p></form></div></section>`;
-  let mode = 'login';
-  app.querySelectorAll('[data-tab]').forEach((button) => button.onclick = () => {
-    mode = button.dataset.tab;
-    app.querySelectorAll('[data-tab]').forEach((item) => item.classList.toggle('active', item === button));
-    const register = mode === 'register';
-    document.getElementById('nameField').hidden = !register;
-    document.querySelector('#authForm button').textContent = register ? 'יצירת חשבון מנהל' : 'התחברות';
-    document.getElementById('authHint').textContent = register ? 'פתיחת חשבון מנהל ראשי. משתמשים נוספים יוזמנו מתוך המערכת.' : 'התחברו לחשבון KinderGuard שלכם.';
-  });
+  app.innerHTML = `<section class="auth-layout"><div class="auth-intro"><div class="eyebrow">ניהול אישורים למעונות יום</div><h2>כל הסניפים.<br>כל האישורים.<br><span>בלי לפספס חידוש.</span></h2><p>מקום אחד לעקוב אחרי אישורים, מועדי פקיעה ומשימות חידוש.</p><div class="auth-decoration"><span>✓</span><span>30 יום</span><span>7 ימים</span><span>יום הפקיעה</span></div></div><div class="panel auth-panel"><h3 class="auth-title">התחברות</h3><form id="authForm"><label>כתובת דוא״ל<input name="email" type="email" autocomplete="username" required></label><label>סיסמה<input name="password" type="password" autocomplete="current-password" minlength="8" required></label><button class="primary full" type="submit">התחברות</button><p id="authHint" class="muted">התחברו לחשבון KinderGuard שלכם.</p></form></div></section>`;
   document.getElementById('authForm').onsubmit = async (event) => {
     event.preventDefault(); const form = new FormData(event.currentTarget);
     try {
-      const endpoint = mode === 'register' ? '/api/users/register' : '/api/users/login';
-      const result = await api(endpoint, { method: 'POST', body: JSON.stringify({ name: form.get('name'), email: form.get('email'), password: form.get('password') }) });
+      const endpoint = '/api/users/login';
+      const result = await api(endpoint, { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password') }) });
       state.token = result.token; await loadApp();
     } catch (error) { toast(error.message, 'danger'); }
   };

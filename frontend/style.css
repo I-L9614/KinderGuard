@@ -258,3 +258,4 @@
   .topbar .nav button{min-height:46px}
   .topbar .brand{margin-inline-end:auto}
 }
+.auth-title{margin:0 0 16px;font-size:22px;color:var(--ink)}

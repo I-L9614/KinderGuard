@@ -40,16 +40,18 @@ await send('Page.addScriptToEvaluateOnNewDocument', { source: bridgeMock });
 await send('Page.navigate', { url: 'http://localhost:4199/' });
 await sleep(2500);
 
-// Register a real admin through the real auth form.
+// Seed a real admin via the API, then log in through the real auth form.
 await evaluate(`
-  document.querySelector('[data-tab="register"]').click();
+  // The login screen is login-only now: seed the first admin through the API, then sign in through the real form.
+  const seed = await fetch('/api/users/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'בודק', email: 'tester@itest.kg', password: 'Password123' }) });
+  if (!seed.ok) throw new Error('seed admin failed: ' + seed.status);
   const set = (name, value) => { const i = document.querySelector('#authForm [name="' + name + '"]'); i.value = value; i.dispatchEvent(new Event('input', { bubbles: true })); };
-  set('name', 'בודק'); set('email', 'tester@itest.kg'); set('password', 'Password123');
+  set('email', 'tester@itest.kg'); set('password', 'Password123');
   document.getElementById('authForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   return true;`);
 await sleep(3000);
-if (!(await evaluate(`return !!document.getElementById('newBranch');`))) fail('login/register did not reach the branches page');
-ok('registered and logged in through the real form');
+if (!(await evaluate(`return !!document.getElementById('newBranch');`))) fail('login did not reach the branches page');
+ok('seeded admin and logged in through the real form');
 
 // Scenario A: pending write blocks the install with no discard offered.
 await evaluate(`
