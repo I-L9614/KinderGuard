@@ -15,6 +15,9 @@ export const applySecurityMiddleware = (app) => {
     max: 200,
     standardHeaders: true,
     legacyHeaders: false,
+    // Render's uptime probe hits /health continuously; counting it toward the
+    // per-IP cap made the probe itself receive 429 and flag the instance as failed.
+    skip: (req) => req.path === '/health',
     handler: (_req, res) => res.status(429).json({ message: 'נשלחו יותר מדי בקשות. המתינו מעט ונסו שוב.' }),
   });
 
