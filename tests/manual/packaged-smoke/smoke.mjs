@@ -206,6 +206,26 @@ try {
   if (!buttonLabel) fail('update button is NOT rendered in the authenticated packaged window');
   ok(`update button rendered in the packaged window ("${buttonLabel}")`);
 
+  // Document opening (the desktop "nothing opens" regression): the app opens a
+  // fetched file with window.open(blob:). The window-open handler used to deny
+  // it silently. Do the same call the document buttons make, with a user
+  // gesture, from the real packaged window, then require a new window whose
+  // URL is a blob: of the app's own origin. (The server's S3 download route is
+  // not exercised here: this smoke has no S3 on purpose.)
+  const pagesBefore = await fetch('http://127.0.0.1:9223/json').then((r) => r.json()).then((t) => t.filter((x) => x.type === 'page').length);
+  const blobOpen = await cdpSend('Runtime.evaluate', {
+    expression: `(()=>{const pdf='%PDF-1.4\\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]>>endobj\\ntrailer<</Root 1 0 R/Size 4>>\\n%%EOF';const u=URL.createObjectURL(new Blob([pdf],{type:'application/pdf'}));window.open(u,'_blank','noopener');return u})()`,
+    userGesture: true, returnByValue: true,
+  });
+  let viewerSeen = false;
+  for (let i = 0; i < 15 && !viewerSeen; i++) {
+    await sleep(1000);
+    const targets = await fetch('http://127.0.0.1:9223/json').then((r) => r.json()).catch(() => []);
+    viewerSeen = targets.some((t) => t.type === 'page' && t.url.startsWith('blob:http://127.0.0.1:4000/')) && targets.filter((t) => t.type === 'page').length > pagesBefore;
+  }
+  if (!viewerSeen) fail('opening a document (window.open of a blob) opened no viewer window in the packaged app');
+  ok('a document blob opens in its own viewer window in the packaged app');
+
   const captureScreen = (name) => {
     const shotOut = path.resolve('dist', name);
     const shotScript = path.join(os.tmpdir(), 'kg-shot-' + name + '.ps1');
