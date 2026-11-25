@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 import { setupIpcHandlers, setupUpdateIpcHandlers } from './ipc.js';
 import { createUpdateController, startUpdateScheduling } from './updater.js';
-import { resolveRunMode, isAllowedNavigation } from './runMode.js';
+import { resolveRunMode, isAllowedNavigation, decideWindowOpen } from './runMode.js';
 
 // The embedded server's configuration (.env with MONGO_URI, JWT_SECRET and
 // the S3 settings) lives in the per-user data folder, outside the install
@@ -173,7 +173,14 @@ const createWindow = async () => {
   };
   mainWindow.webContents.on('will-navigate', navigationGuard);
   mainWindow.webContents.on('will-redirect', navigationGuard);
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => decideWindowOpen(url, runMode.appUrl));
+  // The document viewer window shows that one file only: no navigation, no further popups.
+  mainWindow.webContents.on('did-create-window', (viewer) => {
+    viewer.webContents.on('will-navigate', (event, targetUrl) => {
+      if (decideWindowOpen(targetUrl, runMode.appUrl).action !== 'allow') event.preventDefault();
+    });
+    viewer.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  });
   mainWindow.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   mainWindow.webContents.session.setPermissionCheckHandler(() => false);
 

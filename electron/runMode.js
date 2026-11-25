@@ -31,3 +31,28 @@ export const isAllowedNavigation = (targetUrl, appUrl) => {
     return false;
   }
 };
+
+// window.open policy. Everything is denied except a blob: document created by
+// the app's own origin (the file the user just asked to open: a PDF or image
+// fetched through the authenticated download route). It opens in a small
+// sandboxed viewer window. Any other URL stays blocked.
+export const decideWindowOpen = (targetUrl, appUrl) => {
+  try {
+    const target = new URL(targetUrl);
+    const appOrigin = new URL(appUrl).origin;
+    if (target.protocol === 'blob:' && target.pathname.startsWith(`${appOrigin}/`)) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 1000,
+          height: 780,
+          autoHideMenuBar: true,
+          webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+        },
+      };
+    }
+  } catch {
+    // fall through to deny
+  }
+  return { action: 'deny' };
+};

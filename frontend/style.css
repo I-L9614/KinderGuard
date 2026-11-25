@@ -288,3 +288,12 @@
   .rent-authority-filter{width:100%}
   .form-grid .three-col,.three-col{grid-template-columns:1fr}
 }
+
+/* Press feedback: every button, card-button and clickable card visibly sinks
+   while it is held down, on top of the existing hover lift. */
+button:not(:disabled):active,.clickable:active,summary:active,.tab:active{transform:translateY(1px) scale(.96);filter:brightness(.88);transition-duration:.06s}
+.primary:not(:disabled):active{box-shadow:inset 0 3px 7px #00000038,0 2px 5px #087e7822}
+.secondary:not(:disabled):active,.nav button:active,.icon-button:active,.text-button:active,.inline-link:active,.back-link:active{background:#d3e2dc;color:var(--teal-dark)}
+.branch-card:active,.clickable:active{box-shadow:inset 0 2px 8px #0000001f}
+button:disabled:active{transform:none;filter:none}
+@media (prefers-reduced-motion:reduce){button:not(:disabled):active,.clickable:active{transform:none}}
