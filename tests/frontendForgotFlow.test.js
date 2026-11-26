@@ -41,6 +41,8 @@ describe('frontend forgot-password flow', () => {
       if (!document.getElementById('forgotHint').textContent.includes('בדקו את תיבת הדוא״ל')) throw new Error('confirmation not shown yet');
     });
     expect(document.getElementById('forgotHint').textContent).toContain(GENERIC);
+    expect(document.getElementById('forgotSpam').hidden).toBe(false);
+    expect(document.getElementById('forgotSpam').textContent).toContain('הספאם');
   });
 
   it('back link returns to the login screen', async () => {

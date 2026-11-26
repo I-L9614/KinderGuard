@@ -195,13 +195,14 @@ const renderAuth = () => {
 const renderForgot = () => {
   removeMobileNav();
   headerActions.innerHTML = '';
-  app.innerHTML = `<section class="auth-layout"><div class="auth-intro"><div class="eyebrow">ניהול אישורים למעונות יום</div><h2>כל הסניפים.<br>כל האישורים.<br><span>בלי לפספס חידוש.</span></h2><p>מקום אחד לעקוב אחרי אישורים, מועדי פקיעה ומשימות חידוש.</p><div class="auth-decoration"><span>✓</span><span>30 יום</span><span>7 ימים</span><span>יום הפקיעה</span></div></div><div class="panel auth-panel"><h3 class="auth-title">איפוס סיסמה</h3><form id="forgotForm"><label>שם או דוא״ל<input name="identifier" type="text" autocomplete="username" required></label><button class="primary full" type="submit">שליחת קישור איפוס</button><p id="forgotHint" class="muted">הקישור נשלח לכתובת הדוא״ל שמקושרת לחשבון ותקף ל־30 דקות.</p></form><button type="button" id="backToLogin" class="text-button">חזרה להתחברות</button></div></section>`;
+  app.innerHTML = `<section class="auth-layout"><div class="auth-intro"><div class="eyebrow">ניהול אישורים למעונות יום</div><h2>כל הסניפים.<br>כל האישורים.<br><span>בלי לפספס חידוש.</span></h2><p>מקום אחד לעקוב אחרי אישורים, מועדי פקיעה ומשימות חידוש.</p><div class="auth-decoration"><span>✓</span><span>30 יום</span><span>7 ימים</span><span>יום הפקיעה</span></div></div><div class="panel auth-panel"><h3 class="auth-title">איפוס סיסמה</h3><form id="forgotForm"><label>שם או דוא״ל<input name="identifier" type="text" autocomplete="username" required></label><button class="primary full" type="submit">שליחת קישור איפוס</button><p id="forgotHint" class="muted">הקישור נשלח לכתובת הדוא״ל שמקושרת לחשבון ותקף ל־30 דקות.</p><p id="forgotSpam" class="forgot-spam" hidden><strong>לא מצאתם את המייל?</strong> בדקו גם בתיקיית הספאם או דואר הזבל.</p></form><button type="button" id="backToLogin" class="text-button">חזרה להתחברות</button></div></section>`;
   document.getElementById('backToLogin').onclick = () => renderAuth();
   document.getElementById('forgotForm').onsubmit = async (event) => {
     event.preventDefault(); const form = new FormData(event.currentTarget);
     try {
       const result = await api('/api/users/password/forgot', { method: 'POST', body: JSON.stringify({ identifier: form.get('identifier') }) });
       document.getElementById('forgotHint').textContent = `${result.message} בדקו את תיבת הדוא״ל.`;
+      document.getElementById('forgotSpam').hidden = false;
     } catch (error) { toast(error.message, 'danger'); }
   };
 };
