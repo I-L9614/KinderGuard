@@ -227,3 +227,34 @@ input,select,textarea{accent-color:#10231f}
 @media(max-width:1000px){.branch-top{grid-template-columns:1fr}}
 @media(max-width:620px){.branch-top{gap:10px}.branch-top>*{padding:18px;border-radius:22px}.branch-card-score strong{font-size:44px}}
 @media(max-width:620px){.dash-branches .section-heading p{display:none}.dash-hero p{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}}
+/* ===== Inner pages: plain headers and white tiles with tinted icon boxes, as in the selected design's other pages ===== */
+.welcome-row:not(.dash-hero){background:transparent;color:var(--ink);border-radius:0;padding:0 0 4px;margin:14px 0 18px;overflow:visible}
+.welcome-row:not(.dash-hero):after{display:none}
+.welcome-row:not(.dash-hero) h2{color:var(--ink);font-size:40px;letter-spacing:-1px}
+.welcome-row:not(.dash-hero) p{color:#6b7d78;font-size:15px}
+.welcome-row:not(.dash-hero) .eyebrow{color:#3d7a5f}
+.welcome-row:not(.dash-hero) .primary{background:#10231f;color:#fff}
+.welcome-row:not(.dash-hero) .secondary{background:#fff;color:var(--ink);border:1px solid #d9e2dc}
+.stats-grid:not(.dash-stats):not(.compact){gap:16px}
+.stats-grid:not(.dash-stats) .stat-card{background:#fff!important;flex-direction:row-reverse;justify-content:flex-end;align-items:center;gap:14px;min-height:96px;padding:20px 22px}
+.stats-grid:not(.dash-stats) .stat-card>div{flex:1;text-align:start}
+.stats-grid:not(.dash-stats) .stat-card strong{font-size:22px;letter-spacing:-.4px}
+.stats-grid:not(.dash-stats) .stat-card small{font-size:12.5px;margin-top:4px;color:#7a8c87;font-weight:400}
+.stats-grid:not(.dash-stats) .stat-icon{display:grid;width:52px;height:52px;border-radius:18px;font-size:20px;font-weight:800;letter-spacing:0;background:var(--lime)!important;color:#10231f}
+.stats-grid:not(.dash-stats) .stat-icon.amber{background:var(--amber)!important}
+.stats-grid:not(.dash-stats) .stat-icon.blue{background:var(--sky)!important}
+.stats-grid:not(.dash-stats) .stat-icon.coral{background:var(--pink)!important}
+#rentUpcomingCard .stat-icon,#rentChecksCard .stat-icon,#rentAlertsCard .stat-icon{display:grid;width:52px;height:52px;font-size:20px;letter-spacing:0}
+#rentUpcomingCard strong,#rentChecksCard strong,#rentAlertsCard strong{font-size:22px;letter-spacing:-.4px}
+#rentAnnualCard strong{font-size:30px}#rentAnnualCard .stat-icon{font-size:22px}
+.compact .stat-card{min-height:84px}
+@media(max-width:620px){
+  .welcome-row:not(.dash-hero){margin:8px 0 14px;flex-direction:column;align-items:stretch;gap:12px}
+  .welcome-row:not(.dash-hero) h2{font-size:28px}
+  .stats-grid:not(.dash-stats):not(.compact){grid-template-columns:1fr 1fr}
+  .stats-grid:not(.dash-stats) .stat-card{padding:14px;min-height:0;gap:10px;flex-direction:row-reverse}
+  .stats-grid:not(.dash-stats) .stat-icon,#rentUpcomingCard .stat-icon,#rentChecksCard .stat-icon,#rentAlertsCard .stat-icon{display:grid;width:40px;height:40px;border-radius:14px;font-size:16px}
+  .stats-grid:not(.dash-stats) .stat-card strong,#rentUpcomingCard strong,#rentChecksCard strong,#rentAlertsCard strong{font-size:15px}
+  #rentAnnualCard .stat-icon{display:grid}#rentAnnualCard strong{font-size:19px}
+  .compact.stats-grid .stat-card{flex-direction:column;align-items:flex-start}
+}
