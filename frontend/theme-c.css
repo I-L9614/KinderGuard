@@ -298,3 +298,5 @@ input,select,textarea{accent-color:#10231f}
 .branch-card .arrow.go-chip{width:34px;height:34px;font-size:0}
 @media(max-width:620px){.go{font-size:14px}}
 .dot.neutral{background:#9aaba5}
+@media screen{.list-collapsed{display:none!important}}
+.list-more{margin-top:12px}

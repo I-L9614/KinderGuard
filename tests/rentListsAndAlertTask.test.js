@@ -104,11 +104,11 @@ describe('rent open-payment lists split', () => {
     expect(panel.querySelectorAll('[data-payment-id]').length).toBe(7);
     const more = document.querySelector('[data-rent-more="rentShowAllUpcoming"]');
     expect(more).not.toBeNull();
-    expect(more.textContent).toContain('9');
+    expect(more.textContent).toBe('הצג הכול (עוד 2)');
     more.click();
     await flush();
     expect(document.querySelectorAll('#rentUpcomingPanel [data-payment-id]').length).toBe(9);
-    expect(document.querySelector('[data-rent-more="rentShowAllUpcoming"]').textContent).toContain('7');
+    expect(document.querySelector('[data-rent-more="rentShowAllUpcoming"]').textContent).toBe('הצג פחות');
   });
 
   it('overdue list of 2 shows no show-all button, and the upcoming card counts only true upcoming', () => {
