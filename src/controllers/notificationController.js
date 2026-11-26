@@ -31,9 +31,11 @@ export const generateDueNotifications = async () => {
 };
 
 export const listNotifications = async (req, res) => {
+  // License and rent reminders are for the system admin. A branch user (Manager) is alerted only about
+  // his own tasks at their deadline, which the app derives from his task list. Nothing is deleted.
+  if (req.user.role === 'Manager') return res.json([]);
   const filter = { adminId: getAdminId(req.user) };
   if (req.query.status) filter.status = req.query.status;
-  if (req.user.role === 'Manager') filter.branchId = { $in: req.user.accessibleBranches };
   const items = await Notification.find(filter).sort({ createdAt: -1 }).populate('branchId', 'name').populate({ path: 'licenseId', populate: { path: 'licenseTypeId', select: 'name' } });
   // Rent reminders share this inbox; they carry kind: 'Rent' so the frontend
   // renders and routes them differently from license alerts.
@@ -46,6 +48,8 @@ export const listNotifications = async (req, res) => {
 };
 
 export const updateNotification = async (req, res) => {
+  // License and rent alerts are the admin's to handle; a branch user cannot change them (also on the AI path).
+  if (req.user.role === 'Manager') return res.status(403).json({ message: 'ההתראות על אישורים ושכירות מטופלות על ידי מנהל המערכת' });
   const scope = { _id: req.params.id, adminId: getAdminId(req.user), ...(req.user.role === 'Manager' ? { branchId: { $in: req.user.accessibleBranches } } : {}) };
   // AI path: the proposal names the kind and version, so only that exact record is touched and only if unchanged.
   const exp = req.expectedUpdatedAt;

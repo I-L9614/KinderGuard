@@ -547,6 +547,7 @@ export const updateAgreement = async (req, res) => {
     return res.status(404).json({ message: 'הסכם השכירות לא נמצא' });
   }
   const frequencyBefore = agreement.frequency;
+  const periodBefore = periodAmount(agreement);
   const firstDueBefore = agreement.firstDueDate ? dayStart(agreement.firstDueDate).getTime() : null;
   const body = { ...req.body };
   // Keep the stored annual figure independent: it only re-derives from the
@@ -604,6 +605,21 @@ export const updateAgreement = async (req, res) => {
     };
   }
   const amountsChanged = body.monthlyAmount !== undefined || body.annualAmount !== undefined || body.quarterlyAmount !== undefined;
+  // An amount edit on an agreement that already had one must say whether it applies
+  // retroactively ('all' untouched unpaid payments) or from a date onward ('future'). There is no
+  // default: the caller has to choose. Handed, cleared, grouped and manually edited payments are
+  // never changed by either choice.
+  const periodAfter = periodAmount(agreement);
+  const amountMoved = periodBefore != null && periodAfter != null && periodAfter !== periodBefore;
+  let amountScope = null; let amountFrom = null;
+  if (amountMoved) {
+    amountScope = body.amountScope;
+    if (!['all', 'future'].includes(amountScope)) return res.status(400).json({ message: 'יש לבחור אם שינוי הסכום חל למפרע או מכאן ולהבא', code: 'amount_scope_required' });
+    if (amountScope === 'future') {
+      if (!validDate(body.amountEffectiveFrom)) return res.status(400).json({ message: 'יש להזין תאריך תחילה תקין לשינוי הסכום', code: 'amount_effective_date_required' });
+      amountFrom = dayStart(body.amountEffectiveFrom);
+    }
+  }
   const scheduleChanged = agreement.frequency !== frequencyBefore
     || (agreement.firstDueDate ? agreement.firstDueDate.getTime() : null) !== firstDueBefore;
   try { await agreement.save(); } catch (e) { if (isVersionError(e)) return staleAgreement(res); throw e; }
@@ -611,7 +627,7 @@ export const updateAgreement = async (req, res) => {
   // schedule's unique {agreementId, dueDate} rows.
   if (scheduleChanged) await reconcileScheduleChange(agreement);
   await scheduleRentPayments(agreement);
-  if (amountsChanged || scheduleChanged) await syncPendingPaymentAmounts(agreement);
+  if (amountsChanged || scheduleChanged) await syncPendingPaymentAmounts(agreement, { scope: amountScope || 'all', from: amountFrom });
   await generateDueRentReminders();
   res.json(agreement);
 };
@@ -659,10 +675,11 @@ const reconcileScheduleChange = async (agreement) => {
 // handed/cleared cheques, manual corrections and grouped allocations are real
 // obligations and stay exactly as recorded. Each moved payment gets an audit
 // entry so the original amount survives.
-const syncPendingPaymentAmounts = async (agreement) => {
+const syncPendingPaymentAmounts = async (agreement, { scope = 'all', from = null } = {}) => {
   const amount = periodAmount(agreement);
   if (amount == null) return 0;
-  const pending = await RentPayment.find({ agreementId: agreement._id, status: 'Pending', groupId: null, lastEditedAt: null });
+  const dateFence = scope === 'future' && from ? { dueDate: { $gte: from } } : {};
+  const pending = await RentPayment.find({ agreementId: agreement._id, status: 'Pending', groupId: null, lastEditedAt: null, ...dateFence });
   let synced = 0;
   for (const payment of pending) {
     if (payment.amount === amount) continue;
@@ -671,7 +688,7 @@ const syncPendingPaymentAmounts = async (agreement) => {
     // manual edit or grouping that landed meanwhile is never overwritten back
     // to Pending by this sync.
     const updated = await RentPayment.updateOne(
-      { _id: payment._id, status: 'Pending', groupId: null, lastEditedAt: null },
+      { _id: payment._id, status: 'Pending', groupId: null, lastEditedAt: null, ...dateFence },
       { $set: { amount } },
     );
     if (!updated.modifiedCount) continue;
@@ -681,7 +698,7 @@ const syncPendingPaymentAmounts = async (agreement) => {
       paymentId: payment._id,
       branchName: payment.branchName,
       authorityName: payment.authorityName,
-      reason: 'סכום ההסכם עודכן',
+      reason: scope === 'future' && from ? `סכום ההסכם עודכן מכאן ולהבא (מתאריך ${from.toISOString().slice(0, 10)})` : 'סכום ההסכם עודכן למפרע',
       before,
       after: { amount, dueDate: payment.dueDate },
     });

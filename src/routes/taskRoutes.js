@@ -13,6 +13,7 @@ router.post('/', asyncHandler(protect), [
   body('title').isString().trim().isLength({ min: 1, max: 200 }),
   body('notes').optional().isString().isLength({ max: 2000 }),
   body('dueDate').optional({ nullable: true }).isISO8601(),
+  body('dueTime').optional({ nullable: true }).custom((v) => v === '' || v === null || /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(v)).withMessage('שעת יעד לא תקינה'),
   body('branchId').optional({ nullable: true }).isMongoId(),
   handleValidation,
 ], asyncHandler(createTask));
@@ -22,6 +23,7 @@ router.patch('/:id', asyncHandler(protect), [
   body('notes').optional().isString().isLength({ max: 2000 }),
   body('status').optional().isIn(statuses),
   body('dueDate').optional({ nullable: true }).isISO8601(),
+  body('dueTime').optional({ nullable: true }).custom((v) => v === '' || v === null || /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(v)).withMessage('שעת יעד לא תקינה'),
   body('branchId').optional({ nullable: true }).isMongoId(),
   handleValidation,
 ], asyncHandler(updateTask));

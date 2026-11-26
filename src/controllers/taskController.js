@@ -6,6 +6,8 @@ import { getAdminId } from '../utils/access.js';
 // created. The general admin defaults to her own tasks and can widen to a
 // read-only team view with ?scope=all. Only the creator may update or delete
 // a task, including when the admin looks at someone else's task.
+import { israelWallInstant } from '../utils/israelTime.js';
+const timeProblem = (date, time) => (time && date && israelWallInstant(date, time).status === 'gap' ? 'השעה הזו לא קיימת ביום שינוי השעון בישראל. בחרו שעה אחרת.' : null);
 const ownScope = (user) => ({ adminId: getAdminId(user), createdBy: user._id });
 
 const validateBranch = async (user, branchId) => {
@@ -31,7 +33,9 @@ export const listTasks = async (req, res) => {
 };
 
 export const createTask = async (req, res) => {
-  const { title, notes = '', dueDate = null, branchId = null } = req.body;
+  const { title, notes = '', dueDate = null, branchId = null, dueTime = '' } = req.body;
+  if (dueTime && !dueDate) return res.status(400).json({ message: 'שעת יעד דורשת תאריך יעד' });
+  if (timeProblem(dueDate, dueTime)) return res.status(400).json({ message: timeProblem(dueDate, dueTime) });
   const branchError = await validateBranch(req.user, branchId);
   if (branchError) return res.status(400).json({ message: branchError });
   const task = await Task.create({
@@ -40,6 +44,8 @@ export const createTask = async (req, res) => {
     title,
     notes,
     dueDate: dueDate || null,
+    dueTime: dueDate ? (dueTime || '') : '',
+    dueSetAt: dueDate ? new Date() : null,
     branchId: branchId || null,
   });
   res.status(201).json(task);
@@ -61,7 +67,7 @@ const findEditableTask = async (req, res) => {
 export const updateTask = async (req, res) => {
   const task = await findEditableTask(req, res);
   if (!task) return;
-  const { title, notes, status, dueDate, branchId } = req.body;
+  const { title, notes, status, dueDate, branchId, dueTime } = req.body;
   if (branchId !== undefined) {
     const branchError = await validateBranch(req.user, branchId);
     if (branchError) return res.status(400).json({ message: branchError });
@@ -69,7 +75,16 @@ export const updateTask = async (req, res) => {
   }
   if (title !== undefined) task.title = title;
   if (notes !== undefined) task.notes = notes;
-  if (dueDate !== undefined) task.dueDate = dueDate || null;
+  if (dueDate !== undefined || dueTime !== undefined) {
+    const nextDate = dueDate !== undefined ? (dueDate || null) : task.dueDate;
+    const nextTime = nextDate ? (dueTime !== undefined ? (dueTime || '') : (task.dueTime || '')) : '';
+    if (dueTime && !nextDate) return res.status(400).json({ message: 'שעת יעד דורשת תאריך יעד' });
+    if (timeProblem(nextDate, nextTime)) return res.status(400).json({ message: timeProblem(nextDate, nextTime) });
+    const before = `${task.dueDate ? new Date(task.dueDate).toISOString().slice(0, 10) : ''}|${task.dueTime || ''}`;
+    const after = `${nextDate ? new Date(nextDate).toISOString().slice(0, 10) : ''}|${nextTime}`;
+    task.dueDate = nextDate; task.dueTime = nextTime;
+    if (before !== after) task.dueSetAt = nextDate ? new Date() : null;
+  }
   if (status !== undefined) {
     task.status = status;
     task.completedAt = status === 'Done' ? new Date() : null;

@@ -8,6 +8,18 @@ import { sanitizeActions } from '../src/ai/taskActions.js';
 
 const T = [{ _id: 't1', title: 'תשלום לספק', notes: '', status: 'To_Do' }];
 const B = [{ _id: 'b1', name: 'גן א' }];
+describe('sanitizeActions due time', () => {
+  it('keeps a valid time with a date, drops/rejects time without date, bad format, or a nonexistent DST time', () => {
+    const run = (a, tasks = T) => sanitizeActions(JSON.stringify({ actions: [a] }), tasks, B);
+    const ok = run({ type: 'create_task', title: 'x', dueDate: '2026-12-01', dueTime: '15:30' }); expect(ok.actions[0].dueTime).toBe('15:30');
+    expect(run({ type: 'create_task', title: 'x', dueDate: '2026-12-01', dueTime: '25:00' }).actions[0].dueTime).toBeUndefined();
+    expect(run({ type: 'create_task', title: 'x', dueTime: '15:30' }).actions).toHaveLength(0);
+    expect(run({ type: 'create_task', title: 'x', dueDate: '2027-03-26', dueTime: '02:30' }).actions).toHaveLength(0);
+    expect(run({ type: 'update_task', taskId: 't1', dueTime: '09:00' }).rejected).toContain('שעת יעד בלי תאריך יעד');
+    const withDate = [{ ...T[0], dueDate: new Date('2026-12-05') }];
+    expect(run({ type: 'update_task', taskId: 't1', dueTime: '09:00' }, withDate).actions[0].dueTime).toBe('09:00');
+  });
+});
 describe('sanitizeActions', () => {
   it('keeps valid allowlisted actions', () => {
     const r = sanitizeActions(JSON.stringify({ summary: 's', actions: [{ type: 'close_task', taskId: 't1' }, { type: 'create_task', title: 'בדיקה', dueDate: '2026-12-01', branchId: 'b1' }] }), T, B);
@@ -94,6 +106,12 @@ describe('POST /api/ai/proposals/:id/confirm', () => {
     return (await request(app).post('/api/ai/tasks/propose').set('Authorization', `Bearer ${t}`).send({ prompt: 'x' }).expect(200)).body.actions;
   };
   const confirm = (t, id) => request(app).post(`/api/ai/proposals/${id}/confirm`).set('Authorization', `Bearer ${t}`);
+  it('a confirmed task with a due time stores it and the moment it was set', async () => {
+    const { u, t } = await mk({ aiEnabled: true });
+    const [a] = await propose(t, [{ type: 'create_task', title: 'עם שעה', dueDate: '2027-01-12', dueTime: '14:00' }]);
+    expect(a.dueTime).toBe('14:00'); await confirm(t, a.proposalId).expect(200);
+    const task = await Task.findOne({ title: 'עם שעה', adminId: u._id }); expect(task.dueTime).toBe('14:00'); expect(task.dueSetAt).toBeTruthy();
+  });
   it('creates once: a duplicate confirm returns the stored result, never a second task', async () => {
     const { u, t } = await mk({ aiEnabled: true });
     const [a] = await propose(t, [{ type: 'create_task', title: 'חדשה אחת' }]);

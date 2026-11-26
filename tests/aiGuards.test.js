@@ -33,7 +33,7 @@ describe('Claude client guards', () => {
   });
   it('refuses without key and never calls the network', async () => {
     const f = okFetch();
-    await expect(createClaudeClient({ apiKey: '', fetchImpl: f }).ask({ prompt: 'x' })).rejects.toThrow(/not configured/);
+    await expect(createClaudeClient({ apiKey: '', fetchImpl: f }).ask({ prompt: 'x' })).rejects.toThrow(/שירות ה-AI אינו זמין/);
     expect(f).not.toHaveBeenCalled();
   });
   it('counts first with the same model and payload, then generates with the documented fields', async () => {
@@ -68,7 +68,7 @@ describe('Claude client guards', () => {
     const c = createClaudeClient({ apiKey: 'k', fetchImpl: f, dailyCallLimit: 2 });
     await expect(c.ask({ prompt: 'x' })).rejects.toThrow(/failed/);
     await expect(c.ask({ prompt: 'x' })).rejects.toThrow(/failed/);
-    await expect(c.ask({ prompt: 'x' })).rejects.toThrow(/limit/);
+    await expect(c.ask({ prompt: 'x' })).rejects.toThrow(/מכסת הקריאות היומית/);
     expect(generated(f).length).toBe(2);
     expect(await c.ledger.spent()).toBeCloseTo(2 * worstCaseUsd(1000, 4000));
   });
@@ -79,7 +79,7 @@ describe('Claude client guards', () => {
     await c.ask({ prompt: 'x' });
     await c.ask({ prompt: 'x' }); // real costs are tiny, still fits
     const tight = createClaudeClient({ apiKey: 'k', fetchImpl: okFetch(), budgetUsd: worstCaseUsd(1000, 4000) / 2 });
-    await expect(tight.ask({ prompt: 'x' })).rejects.toThrow(/budget/);
+    await expect(tight.ask({ prompt: 'x' })).rejects.toThrow(/תקציב השימוש/);
   });
   it('flags a reply cut off at max_tokens', async () => {
     const f = okFetch({ messages: { ok: true, json: async () => ({ content: [{ type: 'text', text: 'חצי' }], usage: { input_tokens: 10, output_tokens: 4000 }, stop_reason: 'max_tokens' }) } });

@@ -35,12 +35,12 @@ describe('persistent AI ledger', () => {
     const l = createMongoLedger({ budgetUsd: 100, dailyCallLimit: 5 });
     const res = await Promise.allSettled(Array.from({ length: 30 }, () => l.reserve(0.1)));
     expect(res.filter((r) => r.status === 'fulfilled').length).toBe(5);
-    expect(res.find((r) => r.status === 'rejected').reason.message).toMatch(/Daily/);
+    expect(res.find((r) => r.status === 'rejected').reason.message).toMatch(/מכסת הקריאות היומית/);
     const doc = await AiUsage.findOne({ key: 'ledger' });
     expect(doc.calls).toBe(5); expect(doc.spentUsd).toBeCloseTo(0.5);
     await AiUsage.deleteMany({});
     const l2 = createMongoLedger({ budgetUsd: 0.05, dailyCallLimit: 2 });
-    await expect(l2.reserve(0.1)).rejects.toThrow(/budget/);
+    await expect(l2.reserve(0.1)).rejects.toThrow(/תקציב השימוש/);
     const d2 = await AiUsage.findOne({ key: 'ledger' });
     expect(d2.calls).toBe(0); expect(d2.spentUsd).toBe(0); // refusal took no slot and no spend
   });
@@ -49,7 +49,7 @@ describe('persistent AI ledger', () => {
     let d = new Date('2026-11-26T10:00:00Z');
     const l = createMongoLedger({ budgetUsd: 10, dailyCallLimit: 1, now: () => d });
     await l.reserve(0.5);
-    await expect(l.reserve(0.5)).rejects.toThrow(/Daily/);
+    await expect(l.reserve(0.5)).rejects.toThrow(/מכסת הקריאות היומית/);
     d = new Date('2026-11-27T10:00:00Z');
     await l.reserve(0.5);
     const doc = await AiUsage.findOne({ key: 'ledger' });

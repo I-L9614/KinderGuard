@@ -24,7 +24,7 @@ beforeAll(async () => {
   ({ default: AiProposal } = await import('../src/models/AiProposal.js'));
   const { createAiRouter } = await import('../src/ai/aiRoutes.js');
   ask = vi.fn(async () => ({ text: '{"summary":"","actions":[]}', costUsd: 0 }));
-  app = express(); app.use(express.json()); app.use('/api/ai', createAiRouter({ client: { ask } })); const { default: authRoutes } = await import('../src/routes/authRoutes.js'); app.use('/api/auth', authRoutes);
+  app = express(); app.use(express.json()); app.use('/api/ai', createAiRouter({ client: { ask } })); const { default: authRoutes } = await import('../src/routes/authRoutes.js'); app.use('/api/auth', authRoutes); const { default: notifRoutes } = await import('../src/routes/notificationRoutes.js'); app.use('/api/notifications', notifRoutes);
 }, 600000);
 afterAll(async () => { await mongoose.disconnect(); if (mongoServer) await mongoServer.stop(); });
 
@@ -48,12 +48,22 @@ describe('notification actions end to end', () => {
     const a = await Notification.findById(n._id); expect(a.status).toBe('Resolved'); expect(String(a.resolvedBy)).toBe(String(u._id)); expect((await Notification.findById(n2._id)).status).toBe('Open');
     const o = await mk({ aiEnabled: true }); const q = await prop(o.t, [{ type: 'set_notification_status', notificationId: String(n2._id), kind: 'License', status: 'Dismissed' }]); expect(q.body.actions).toHaveLength(0);
   });
-  it('rent reminder works; a manager only reaches alerts of assigned branches', async () => {
+  it('rent reminder works; a manager cannot reach license or rent alerts at all', async () => {
     const { u, t } = await mk({ aiEnabled: true }); const { b } = await seed(u, 'גן ג'); const { b: b2, n: n2 } = await seed(u, 'גן ד');
     const ag = new mongoose.Types.ObjectId(); const rr = await RentReminder.create({ adminId: u._id, branchId: b._id, rentAgreementId: ag, rentTrigger: 'week_before_due', dueDate: new Date('2027-01-05'), rentPaymentId: new mongoose.Types.ObjectId() });
     const p = await prop(t, [{ type: 'set_notification_status', notificationId: String(rr._id), kind: 'Rent', status: 'Dismissed' }]); expect((await confirm(t, p.body.actions[0].proposalId)).status).toBe(200); expect((await RentReminder.findById(rr._id)).status).toBe('Dismissed');
     const m = await mk({ aiEnabled: true, role: 'Manager', adminId: u._id, accessibleBranches: [b._id] });
-    const q = await prop(m.t, [{ type: 'set_notification_status', notificationId: String(n2._id), kind: 'License', status: 'Resolved' }]); expect(q.status).toBe(200); expect(q.body.actions).toHaveLength(0);
+    const q = await prop(m.t, [{ type: 'set_notification_status', notificationId: String(n2._id), kind: 'License', status: 'Resolved' }]); expect(q.status).toBe(403);
     expect(b2).toBeTruthy();
+  });
+  it('manager gets no license or rent alerts from the list and cannot change them; admin is unchanged', async () => {
+    const { u, t } = await mk({}); const { b, n } = await seed(u, 'גן ה');
+    const rr = await RentReminder.create({ adminId: u._id, branchId: b._id, rentAgreementId: new mongoose.Types.ObjectId(), rentTrigger: 'week_before_due', dueDate: new Date('2027-01-05'), amount: 100 });
+    const m = await mk({ role: 'Manager', adminId: u._id, accessibleBranches: [b._id] });
+    const asAdmin = await request(app).get('/api/notifications').set('Authorization', `Bearer ${t}`); expect(asAdmin.body.map((x) => x.kind).sort()).toEqual(['License', 'Rent']);
+    const asMgr = await request(app).get('/api/notifications').set('Authorization', `Bearer ${m.t}`); expect(asMgr.status).toBe(200); expect(asMgr.body).toEqual([]);
+    for (const id of [n._id, rr._id]) { const r = await request(app).patch(`/api/notifications/${id}`).set('Authorization', `Bearer ${m.t}`).send({ status: 'Dismissed' }); expect(r.status).toBe(403); }
+    expect((await Notification.findById(n._id)).status).toBe('Open'); expect((await RentReminder.findById(rr._id)).status).toBe('Open');
+    const ok = await request(app).patch(`/api/notifications/${n._id}`).set('Authorization', `Bearer ${t}`).send({ status: 'In_Progress' }); expect(ok.status).toBe(200);
   });
 });

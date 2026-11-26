@@ -160,7 +160,14 @@ export const sanitizeAgreementActions = (raw, agreements, ctx = {}) => {
     // figures are only derived when empty. Show what each scheduled payment will be.
     const sim = { frequency: changes.frequency || cur.frequency, monthlyAmount: changes.monthlyAmount ?? cur.monthlyAmount, quarterlyAmount: changes.quarterlyAmount ?? cur.quarterlyAmount ?? (changes.monthlyAmount ? changes.monthlyAmount * 3 : null), annualAmount: changes.annualAmount ?? cur.annualAmount ?? (changes.monthlyAmount ? changes.monthlyAmount * 12 : null) };
     const effect = { beforeFrequency: cur.frequency, afterFrequency: sim.frequency, before: periodAmount(cur) ?? null, after: periodAmount(sim) ?? null };
-    seen.add(String(cur._id)); actions.push({ ...base, changes, ...(changes.monthlyAmount !== undefined || changes.frequency !== undefined || changes.quarterlyAmount !== undefined || changes.annualAmount !== undefined ? { effect } : {}) });
+    // An amount edit must say whether it is retroactive or from a date onward. The user picks on the card; there is no default.
+    const moved = effect.before != null && effect.after != null && effect.after !== effect.before;
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+    const scopeChoice = moved ? { needsChoice: true, choiceField: 'amountScope', effectiveFrom: today, candidates: [
+      { id: 'all', name: 'למפרע', detail: 'כל התשלומים הממתינים שלא נערכו ידנית, כולל כאלה שמועדם כבר עבר. תשלומים שנמסרו, נפרעו, שויכו לתשלום מרוכז או נערכו ידנית לא ישתנו.' },
+      { id: 'future', name: 'מכאן ולהבא (מתאריך לבחירה)', detail: 'רק תשלומים ממתינים שלא נערכו ידנית עם מועד מהתאריך שתבחרו ואילך. תשלומים שנמסרו, נפרעו, שויכו לתשלום מרוכז או נערכו ידנית לא ישתנו.' },
+    ] } : {};
+    seen.add(String(cur._id)); actions.push({ ...base, ...scopeChoice, changes, ...(changes.monthlyAmount !== undefined || changes.frequency !== undefined || changes.quarterlyAmount !== undefined || changes.annualAmount !== undefined ? { effect } : {}) });
   }
   return { summary: typeof o.summary === 'string' ? o.summary.slice(0, 300) : '', actions, rejected };
 };

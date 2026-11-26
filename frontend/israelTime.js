@@ -43,3 +43,20 @@ export const israelMidnightInstant = (value) => {
 };
 // Last millisecond of that Israel calendar day.
 export const israelEndOfDayInstant = (value) => new Date(israelMidnightInstant(new Date(calendarDay(value).getTime() + DAY_MS)).getTime() - 1);
+
+// Real instant of a wall-clock time (HH:MM) on an Israel calendar date, DST-aware via the IANA zone.
+// status 'ok': exactly one instant. 'ambiguous' (clocks go back, the time happens twice): policy is the FIRST occurrence.
+// 'gap' (clocks go forward, the time does not exist): no instant is guessed; callers must reject it. The fallback instant
+// for a 'gap' is only a deterministic value for legacy data and is never produced by validated input.
+export const israelWallInstant = (value, hhmm) => {
+  const day = calendarDay(value);
+  const [h, m] = String(hhmm).split(':').map(Number);
+  const wall = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), h, m);
+  const hits = [3, 2].map((off) => new Date(wall - off * 3600000)).filter((t) => {
+    const p = israelParts(t);
+    return p.year === day.getUTCFullYear() && p.month === day.getUTCMonth() + 1 && p.day === day.getUTCDate() && p.hour === h && p.minute === m;
+  });
+  if (hits.length === 2) return { status: 'ambiguous', instant: hits[0] };
+  if (hits.length === 1) return { status: 'ok', instant: hits[0] };
+  return { status: 'gap', instant: new Date(wall - 2 * 3600000) };
+};

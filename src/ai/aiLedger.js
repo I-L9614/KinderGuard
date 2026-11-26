@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import AiUsage, { AiReservation } from '../models/AiUsage.js';
+import { AI_MSG } from './claudeClient.js';
 
 // One document holds lifetime spend, today's date and today's call count, so a
 // reservation is ONE conditional atomic update: it passes only if spend plus the
@@ -34,8 +35,8 @@ export const createMongoLedger = ({ budgetUsd, dailyCallLimit, now = () => new D
     }
     // Refused: say which limit, for a useful message. Nothing was changed.
     const cur = await AiUsage.findOne({ key: KEY });
-    if (cur && cur.spentUsd + estUsd > budgetUsd) throw Object.assign(new Error('AI budget reached'), { statusCode: 429 });
-    throw Object.assign(new Error('Daily AI call limit reached'), { statusCode: 429 });
+    if (cur && cur.spentUsd + estUsd > budgetUsd) throw Object.assign(new Error(AI_MSG.budget), { statusCode: 429 });
+    throw Object.assign(new Error(AI_MSG.daily), { statusCode: 429 });
   },
   // Idempotent: only the first settle of a reservation id changes spend.
   async settle(reservation, actualUsd) {

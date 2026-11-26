@@ -9,7 +9,7 @@
 // - Click targets route to the relevant record; stale/deleted/unauthorized
 //   targets fall back to the alerts inbox instead of erroring.
 
-import { israelParts } from './israelTime.js';
+import { israelParts, israelToday, calendarDay, israelWallInstant } from './israelTime.js';
 
 export const SEEN_KEY = 'seenNotifications';
 export const SESSION_KEY = 'kg-session-primed';
@@ -20,6 +20,37 @@ export const SESSION_KEY = 'kg-session-primed';
 // an app that was closed at 11:00 gets its popup at the next launch/refresh.
 export const POPUP_HOUR_ISRAEL = 11;
 export const popupWindowOpen = (now = new Date(), hour = POPUP_HOUR_ISRAEL) => israelParts(now).hour >= hour;
+
+// Branch users (role Manager) are alerted only about tasks they created themselves. Done tasks never alert.
+// - No due time: the deadline is the Israel calendar day; the alert is due from that day on (11:00 popup rule applies).
+// - With a due time (Israel local): the deadline alert is due from that moment, plus a reminder 60 and 30 minutes before.
+//   A reminder only counts if its moment is strictly after the deadline was set (dueSetAt), so nothing fires
+//   instantly or in hindsight. If both reminders have passed, only the later one is shown. Reminders stop at the deadline.
+// Ids carry the deadline (day and time), so each is toasted once per deadline version; moving the deadline re-arms them.
+export const REMINDER_MINUTES = [60, 30];
+export const dueInstant = (t) => (t?.dueTime && t.dueDate ? israelWallInstant(t.dueDate, t.dueTime).instant : null);
+const deadlineKey = (t) => `${calendarDay(t.dueDate).toISOString().slice(0, 10)}${t.dueTime ? `T${t.dueTime}` : ''}`;
+export const taskDeadlineArrived = (t, now = new Date()) => {
+  if (!t || t.status === 'Done' || !t.editable || !t.dueDate) return false;
+  const at = dueInstant(t);
+  return at ? now >= at : calendarDay(t.dueDate) <= israelToday(now);
+};
+export const dueTaskAlertItems = (tasks, now = new Date()) => {
+  const out = [];
+  for (const t of tasks || []) {
+    if (!t || t.status === 'Done' || !t.editable || !t.dueDate) continue;
+    const base = { taskId: t._id, title: t.title, dueDate: t.dueDate, dueTime: t.dueTime || '', branchId: t.branchId, status: 'Open' };
+    const at = dueInstant(t);
+    if (taskDeadlineArrived(t, now)) { out.push({ ...base, _id: `task-${t._id}-${deadlineKey(t)}`, kind: 'Task', timed: Boolean(at) }); continue; }
+    if (at && t.dueSetAt) {
+      const set = new Date(t.dueSetAt).getTime();
+      const due = REMINDER_MINUTES.map((mins) => ({ mins, when: at.getTime() - mins * 60000 })).filter((r) => r.when > set && r.when <= now.getTime());
+      const last = due.sort((a, b) => b.when - a.when)[0];
+      if (last) out.push({ ...base, _id: `task-${t._id}-${deadlineKey(t)}-r${last.mins}`, kind: 'TaskReminder', minutes: last.mins, timed: true });
+    }
+  }
+  return out;
+};
 
 export const planNativeToasts = (alerts, { seenIds, firstOfSession }) => {
   const fresh = alerts.filter((item) => item.status === 'Open' && !seenIds.includes(item._id));
@@ -34,6 +65,7 @@ export const planNativeToasts = (alerts, { seenIds, firstOfSession }) => {
 // or is otherwise unknown lands on the alerts inbox.
 export const resolveAlertTarget = (target, state) => {
   if (!target || target.kind === 'Summary') return { page: 'alerts' };
+  if (target.kind === 'Task' || target.kind === 'TaskReminder') return { page: 'alerts' };
   if (target.kind === 'License') {
     const branchId = target.branchId?._id || target.branchId;
     const licenseId = target.licenseId?._id || target.licenseId || null;
@@ -56,6 +88,8 @@ export const resolveAlertTarget = (target, state) => {
 // Typed titles/bodies for the native toast: rent vs permit is obvious at a glance.
 export const alertToastPayload = (item, { typeName, branchName, date, money }) => {
   const branchId = item.branchId?._id || item.branchId;
+  if (item.kind === 'Task') return { title: 'KinderGuard · הגיע מועד משימה', body: `${item.title} · מועד יעד ${date(item.dueDate)}${item.dueTime ? ` ${item.dueTime}` : ''}`, target: { id: item._id, kind: 'Task' } };
+  if (item.kind === 'TaskReminder') return { title: item.minutes === 30 ? 'KinderGuard · משימה בעוד חצי שעה' : 'KinderGuard · משימה בעוד שעה', body: `${item.title} · היום ב־${item.dueTime}`, target: { id: item._id, kind: 'TaskReminder' } };
   if (item.kind === 'Rent') {
     const isSeries = item.rentTrigger === 'month_before_series_end';
     const name = item.branchName || branchName(item.branchId);

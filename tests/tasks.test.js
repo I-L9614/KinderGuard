@@ -106,4 +106,21 @@ describe('Task visibility and ownership', () => {
     const team = await request(app).get('/api/tasks?scope=all').set('Authorization', `Bearer ${adminToken}`).expect(200);
     expect(team.body.find((item) => item._id === task._id)).toBeUndefined();
   }, 30000);
+  it('optional due time: validated, needs a date, dueSetAt moves only when the deadline changes, old date-only tasks stay valid', async () => {
+    const auth = { Authorization: `Bearer ${adminToken}` };
+    await request(app).post('/api/tasks').set(auth).send({ title: 'x', dueDate: '2027-01-10', dueTime: '25:99' }).expect(400);
+    await request(app).post('/api/tasks').set(auth).send({ title: 'x', dueTime: '10:00' }).expect(400);
+    await request(app).post('/api/tasks').set(auth).send({ title: 'x', dueDate: '2027-03-26', dueTime: '02:30' }).expect(400);
+    const dateOnly = (await request(app).post('/api/tasks').set(auth).send({ title: 'date only', dueDate: '2027-01-10' }).expect(201)).body;
+    expect(dateOnly.dueTime).toBe('');
+    const t = (await request(app).post('/api/tasks').set(auth).send({ title: 'timed', dueDate: '2027-01-10', dueTime: '15:30' }).expect(201)).body;
+    expect(t.dueTime).toBe('15:30'); expect(t.dueSetAt).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 15));
+    const renamed = (await request(app).patch(`/api/tasks/${t._id}`).set(auth).send({ title: 'renamed', dueDate: '2027-01-10', dueTime: '15:30' }).expect(200)).body;
+    expect(renamed.dueSetAt).toBe(t.dueSetAt);
+    const moved = (await request(app).patch(`/api/tasks/${t._id}`).set(auth).send({ dueTime: '16:00' }).expect(200)).body;
+    expect(moved.dueTime).toBe('16:00'); expect(new Date(moved.dueSetAt) > new Date(t.dueSetAt)).toBe(true);
+    const cleared = (await request(app).patch(`/api/tasks/${t._id}`).set(auth).send({ dueDate: null }).expect(200)).body;
+    expect(cleared.dueDate).toBeNull(); expect(cleared.dueTime).toBe(''); expect(cleared.dueSetAt).toBeNull();
+  });
 });

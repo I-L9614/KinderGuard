@@ -87,24 +87,33 @@ afterAll(async () => { await mongoose.disconnect(); if (mongoServer) await mongo
 describe('agreement actions end to end', () => {
   const mkAgr = async (u, extra = {}) => { const b = await Branch.create({ adminId: u._id, name: `גן ${Math.random().toString(36).slice(2, 6)}` }); const au = await Authority.create({ adminId: u._id, name: `רשות ${Math.random().toString(36).slice(2, 6)}`, ...(Authority.schema.path('type') ? { type: 'council' } : {}) }).catch(async () => Authority.create({ adminId: u._id, name: `רשות ${Math.random().toString(36).slice(2, 6)}` })); return RentAgreement.create({ adminId: u._id, branchId: b._id, authorityId: au._id, direction: 'outgoing', monthlyAmount: 1000, frequency: 'monthly', paymentMethod: 'transfer', firstDueDate: new Date('2030-01-01'), ...extra }); };
   const prop = (t, a, prompt = 'x') => { ask.mockResolvedValueOnce({ text: JSON.stringify({ actions: [a] }), costUsd: 0 }); return request(app).post('/api/ai/agreements/propose').set('Authorization', `Bearer ${t}`).send({ prompt }); };
-  const confirm = (t, id, withGrant = true) => { const pr = (async () => { const rq = request(app).post(`/api/ai/proposals/${id}/confirm`).set('Authorization', `Bearer ${t}`); if (withGrant) { const a = (await (await import('../src/models/AiProposal.js')).default.findById(id)).action.type; const g = await request(app).post('/api/auth/step-up').set('Authorization', `Bearer ${t}`).send({ password: 'Password123', action: `ai:${a}`, scope: id }); if (!g.body.stepUpToken) return g; rq.set('X-Step-Up', g.body.stepUpToken); } return rq.send({}); })(); return { result: pr, expect: async (c) => { const r = await pr; expect(r.status, JSON.stringify(r.body)).toBe(c); return r; } }; };
+  const confirm = (t, id, withGrant = true, choice, extra) => { const pr = (async () => { const rq = request(app).post(`/api/ai/proposals/${id}/confirm`).set('Authorization', `Bearer ${t}`); if (withGrant) { const a = (await (await import('../src/models/AiProposal.js')).default.findById(id)).action.type; const g = await request(app).post('/api/auth/step-up').set('Authorization', `Bearer ${t}`).send({ password: 'Password123', action: `ai:${a}`, scope: id }); if (!g.body.stepUpToken) return g; rq.set('X-Step-Up', g.body.stepUpToken); } return rq.send(choice ? { branchId: choice, ...(extra || {}) } : {}); })(); return { result: pr, expect: async (c) => { const r = await pr; expect(r.status, JSON.stringify(r.body)).toBe(c); return r; } }; };
   it('update needs the grant; applies only the proposed change through the controller; stale proposal is refused', async () => {
     const { u, t } = await mk({ aiEnabled: true, password: 'Password123' }); const ag = await mkAgr(u);
     const r = (await prop(t, { type: 'update_agreement', agreementId: String(ag._id), monthlyAmount: 1500 }).expect(200)).body; const a = r.actions[0];
     expect((await RentAgreement.findById(ag._id)).monthlyAmount).toBe(1000);
-    await confirm(t, a.proposalId, false).expect(403);
+    await confirm(t, a.proposalId, false, 'all').expect(403);
     expect((await RentAgreement.findById(ag._id)).monthlyAmount).toBe(1000);
-    await confirm(t, a.proposalId).expect(200);
+    // an amount change carries a REQUIRED retro/from-now choice with no default
+    expect(a.needsChoice).toBe(true); expect(a.choiceField).toBe('amountScope'); expect(a.candidates.map((c) => c.id)).toEqual(['all', 'future']);
+    await confirm(t, a.proposalId, false).expect(400);
+    expect((await RentAgreement.findById(ag._id)).monthlyAmount).toBe(1000);
+    await confirm(t, a.proposalId, true, 'all').expect(200);
     const after = await RentAgreement.findById(ag._id); expect(after.monthlyAmount).toBe(1500); expect(after.frequency).toBe('monthly');
     const r2 = (await prop(t, { type: 'update_agreement', agreementId: String(ag._id), monthlyAmount: 1700 }).expect(200)).body;
     await RentAgreement.updateOne({ _id: ag._id }, { $set: { paymentMethod: 'cheque' } });
-    await confirm(t, r2.actions[0].proposalId).expect(409);
+    await confirm(t, r2.actions[0].proposalId, true, 'all').expect(409);
     expect((await RentAgreement.findById(ag._id)).monthlyAmount).toBe(1500);
     // quarterly figure: traced to the request, needs the grant, written by the controller
     const q = (await prop(t, { type: 'update_agreement', agreementId: String(ag._id), quarterlyAmount: 4600 }, 'תעדכן את הסכום הרבעוני ל-4600').expect(200)).body.actions[0];
-    expect(q.changes).toEqual({ quarterlyAmount: 4600 }); await confirm(t, q.proposalId, false).expect(403);
+    expect(q.changes).toEqual({ quarterlyAmount: 4600 }); await confirm(t, q.proposalId, false, 'future').expect(403);
     expect((await RentAgreement.findById(ag._id)).quarterlyAmount).not.toBe(4600);
-    await confirm(t, q.proposalId).expect(200); expect((await RentAgreement.findById(ag._id)).quarterlyAmount).toBe(4600);
+    // from-now needs a real chosen date, checked before the step-up grant is spent
+    const f = (await prop(t, { type: 'update_agreement', agreementId: String(ag._id), monthlyAmount: 1800, quarterlyAmount: 4600 }, 'תעדכן את הסכום החודשי ל-1800 ואת הרבעוני ל-4600').expect(200)).body.actions[0];
+    await confirm(t, f.proposalId, false, 'future').expect(400); await confirm(t, f.proposalId, false, 'future', { amountEffectiveFrom: '2026-02-31' }).expect(400);
+    expect((await RentAgreement.findById(ag._id)).monthlyAmount).toBe(1500);
+    await confirm(t, f.proposalId, true, 'future', { amountEffectiveFrom: '2027-03-01' }).expect(200); expect((await RentAgreement.findById(ag._id)).monthlyAmount).toBe(1800); expect((await RentAgreement.findById(ag._id)).quarterlyAmount).toBe(4600);
+    const stored = await (await import('../src/models/AiProposal.js')).default.findById(f.proposalId); expect(stored.action.changes.amountScope).toBe('future'); expect(stored.action.changes.amountEffectiveFrom).toBe('2027-03-01');
   });
   it('create_agreement: sensitive, needs every field and the direction, exact ids, blocks a duplicate active one, similar branch needs a pick, ambiguous payer refused', async () => {
     const { u, t } = await mk({ aiEnabled: true, password: 'Password123' }); const o = await mk({ aiEnabled: true });
@@ -142,7 +151,7 @@ describe('agreement actions end to end', () => {
     const { u, t } = await mk({ aiEnabled: true, password: 'Password123' }); const ag = await mkAgr(u);
     const r = (await prop(t, { type: 'update_agreement', agreementId: String(ag._id), monthlyAmount: 2100 }).expect(200)).body;
     const pid = r.actions[0].proposalId;
-    const [c1, c2] = await Promise.all([confirm(t, pid).result, confirm(t, pid).result]);
+    const [c1, c2] = await Promise.all([confirm(t, pid, true, 'all').result, confirm(t, pid, true, 'all').result]);
     // A duplicate that arrives after the first finished legitimately gets 200 with duplicate:true (the stored outcome), so count real applications only.
     expect([c1, c2].filter((x) => x.status === 200 && !x.body?.duplicate).length).toBe(1);
     expect([c1.status, c2.status].every((x) => [200, 403, 409].includes(x))).toBe(true);
@@ -150,7 +159,7 @@ describe('agreement actions end to end', () => {
     // Two writers loaded the same version: exactly one save wins, the other gets 409, never a 500 or a silent overwrite.
     const ag2 = await mkAgr(u);
     const call = (body, expectedUpdatedAt) => new Promise((resolve) => { const res = { code: 200, status(c) { this.code = c; return this; }, json(v) { resolve({ code: this.code, v }); return this; } }; updateAgreement({ user: u, params: { id: String(ag2._id) }, body, expectedUpdatedAt }, res).catch((e) => resolve({ code: 500, e })); });
-    const [a, b] = await Promise.all([call({ monthlyAmount: 3000 }), call({ monthlyAmount: 4000 })]);
+    const [a, b] = await Promise.all([call({ monthlyAmount: 3000, amountScope: 'all' }), call({ monthlyAmount: 4000, amountScope: 'all' })]);
     const codes = [a.code, b.code].sort();
     expect(codes.includes(500)).toBe(false);
     expect(codes.filter((c) => c === 200).length).toBeGreaterThanOrEqual(1);

@@ -92,9 +92,9 @@ describe('agreement write races (forced interleavings)', () => {
     const u = await mk(); const ag = await mkAgr(u);
     const pay = await RentPayment.create({ adminId: u._id, agreementId: ag._id, branchId: ag.branchId, authorityId: ag.authorityId, dueDate: new Date('2030-02-01'), amount: 1000, method: 'transfer' });
     const g = pauseNextSave(RentAgreement);
-    const aP = call(updateAgreement, { user: u, params: { id: String(ag._id) }, body: { monthlyAmount: 3000 } });
+    const aP = call(updateAgreement, { user: u, params: { id: String(ag._id) }, body: { monthlyAmount: 3000, amountScope: 'all' } });
     await g.enteredP; // writer A loaded the agreement and is about to save
-    const b = await call(updateAgreement, { user: u, params: { id: String(ag._id) }, body: { monthlyAmount: 4000 } });
+    const b = await call(updateAgreement, { user: u, params: { id: String(ag._id) }, body: { monthlyAmount: 4000, amountScope: 'all' } });
     expect(b.code).toBe(200);
     g.release();
     const a = await aP;
@@ -110,7 +110,7 @@ describe('agreement write races (forced interleavings)', () => {
   it('an update racing a close: the close commits, the update gets 409, the agreement stays closed', async () => {
     const u = await mk(); const ag = await mkAgr(u);
     const g = pauseNextSave(RentAgreement);
-    const aP = call(updateAgreement, { user: u, params: { id: String(ag._id) }, body: { monthlyAmount: 3000 } });
+    const aP = call(updateAgreement, { user: u, params: { id: String(ag._id) }, body: { monthlyAmount: 3000, amountScope: 'all' } });
     await g.enteredP;
     const b = await call(closeAgreement, { user: u, params: { id: String(ag._id) }, body: { reason: 'הסכם הסתיים' } });
     expect(b.code).toBe(200);
@@ -187,7 +187,7 @@ describe('payment and schedule stale-write windows (forced interleavings)', () =
     const u = await mk(); const ag = await mkAgr(u);
     const pay = await RentPayment.create({ adminId: u._id, agreementId: ag._id, branchId: ag.branchId, authorityId: ag.authorityId, dueDate: new Date('2030-02-01'), amount: 1000, method: 'cheque' });
     const g = pauseAfterNextFind(RentPayment);
-    const upP = call(updateAgreement, { user: u, params: { id: String(ag._id) }, body: { monthlyAmount: 2000 } });
+    const upP = call(updateAgreement, { user: u, params: { id: String(ag._id) }, body: { monthlyAmount: 2000, amountScope: 'all' } });
     await g.enteredP; // syncPendingPaymentAmounts holds the untouched pending payment...
     await RentPayment.updateOne({ _id: pay._id }, { $set: { status: 'Handed', paidAt: new Date() } }); // ...while the handover commits
     g.release();

@@ -114,6 +114,35 @@ describe('Rent module', () => {
     expect(derivedPayments[0].amount).toBe(25000);
   });
 
+  it('an amount edit REQUIRES a retro/from-date choice; from-date moves only untouched pending rows on or after it; paid/handed/edited stay', async () => {
+    const created = await request(app).post('/api/rent/agreements').set(auth()).send({
+      branchId, authorityId, monthlyAmount: 1000, frequency: 'monthly', paymentMethod: 'cheque', firstDueDate: daysFromNow(3),
+    }).expect(201);
+    const id = created.body._id; const rows = async () => RentPayment.find({ agreementId: id }).sort({ dueDate: 1 });
+    const before = await rows(); expect(before.length).toBeGreaterThan(4);
+    // no default: missing or invalid scope, or a future scope without a date, is refused and nothing changes
+    await request(app).patch(`/api/rent/agreements/${id}`).set(auth()).send({ monthlyAmount: 1200 }).expect(400);
+    await request(app).patch(`/api/rent/agreements/${id}`).set(auth()).send({ monthlyAmount: 1200, amountScope: 'maybe' }).expect(400);
+    await request(app).patch(`/api/rent/agreements/${id}`).set(auth()).send({ monthlyAmount: 1200, amountScope: 'future' }).expect(400);
+    await request(app).patch(`/api/rent/agreements/${id}`).set(auth()).send({ monthlyAmount: 1200, amountScope: 'future', amountEffectiveFrom: 'soon' }).expect(400);
+    expect((await RentAgreement.findById(id)).monthlyAmount).toBe(1000); expect((await rows()).every((p) => p.amount === 1000)).toBe(true);
+    // handed row stays; a manually edited row stays; from-date skips the earlier rows
+    await request(app).post(`/api/rent/payments/${before[0]._id}/handed`).set(auth()).expect(200);
+    await request(app).patch(`/api/rent/payments/${before[3]._id}`).set(auth()).send({ amount: 1010, dueDate: before[3].dueDate }).expect(200);
+    const from = new Date(before[2].dueDate).toISOString().slice(0, 10);
+    await request(app).patch(`/api/rent/agreements/${id}`).set(auth()).send({ monthlyAmount: 1200, amountScope: 'future', amountEffectiveFrom: from }).expect(200);
+    const after = await rows();
+    expect(after[0].amount).toBe(1000); expect(after[1].amount).toBe(1000); // handed, and an untouched row before the date
+    expect(after[2].amount).toBe(1200); expect(after[3].amount).toBe(1010); // on the date follows; manual edit stays
+    expect(after[4].amount).toBe(1200);
+    const au = await RentAudit.findOne({ action: 'sync_agreement_amounts', paymentId: after[2]._id }); expect(au.reason).toContain('מכאן ולהבא'); expect(au.reason).toContain(from);
+    // retroactive: the untouched row before the date now follows too; handed and manual still stay
+    await request(app).patch(`/api/rent/agreements/${id}`).set(auth()).send({ monthlyAmount: 1300, amountScope: 'all' }).expect(200);
+    const last = await rows();
+    expect(last[0].amount).toBe(1000); expect(last[1].amount).toBe(1300); expect(last[2].amount).toBe(1300); expect(last[3].amount).toBe(1010);
+    expect((await RentAudit.findOne({ action: 'sync_agreement_amounts', paymentId: last[1]._id })).reason).toContain('למפרע');
+  });
+
   it('syncs untouched pending payments when agreement amounts change, sparing edited, handed and grouped ones', async () => {
     const created = await request(app).post('/api/rent/agreements').set(auth()).send({
       branchId, authorityId, monthlyAmount: 3000, frequency: 'quarterly', paymentMethod: 'cheque', firstDueDate: daysFromNow(3),
@@ -123,7 +152,7 @@ describe('Rent module', () => {
     // One payment corrected by hand, one marked as handed: both must survive.
     await request(app).patch(`/api/rent/payments/${payments[0]._id}`).set(auth()).send({ amount: 9010, dueDate: payments[0].dueDate }).expect(200);
     await request(app).post(`/api/rent/payments/${payments[1]._id}/handed`).set(auth()).expect(200);
-    await request(app).patch(`/api/rent/agreements/${created.body._id}`).set(auth()).send({ quarterlyAmount: 9500 }).expect(200);
+    await request(app).patch(`/api/rent/agreements/${created.body._id}`).set(auth()).send({ quarterlyAmount: 9500, amountScope: 'all' }).expect(200);
     const after = await RentPayment.find({ agreementId: created.body._id }).sort({ dueDate: 1 });
     expect(after[0].amount).toBe(9010); // manual correction wins
     expect(after[1].amount).toBe(9000); // handed cheque keeps its real amount
@@ -154,7 +183,7 @@ describe('Rent module', () => {
     // One payment corrected by hand, one handed over: both must survive any reconciliation.
     await request(app).patch(`/api/rent/payments/${before[2]._id}`).set(auth()).send({ amount: 3010, dueDate: before[2].dueDate }).expect(200);
     await request(app).post(`/api/rent/payments/${before[1]._id}/handed`).set(auth()).expect(200);
-    await request(app).patch(`/api/rent/agreements/${created.body._id}`).set(auth()).send({ frequency: 'quarterly' }).expect(200);
+    await request(app).patch(`/api/rent/agreements/${created.body._id}`).set(auth()).send({ frequency: 'quarterly', amountScope: 'all' }).expect(200);
     const after = await RentPayment.find({ agreementId: created.body._id }).sort({ dueDate: 1 });
     const pending = after.filter((p) => p.status === 'Pending' && !p.lastEditedAt);
     // Untouched pending rows now sit exactly on the quarterly cadence (4-5 in the window), at the quarterly amount.
@@ -177,7 +206,7 @@ describe('Rent module', () => {
     expect(audits[0].before.status).toBe('Pending');
     expect(audits[0].after.removed).toBe(true);
     // Changing back rematerializes the monthly cadence cleanly (no unique-key blockage).
-    await request(app).patch(`/api/rent/agreements/${created.body._id}`).set(auth()).send({ frequency: 'monthly' }).expect(200);
+    await request(app).patch(`/api/rent/agreements/${created.body._id}`).set(auth()).send({ frequency: 'monthly', amountScope: 'all' }).expect(200);
     const rematerialized = await RentPayment.countDocuments({ agreementId: created.body._id, status: 'Pending' });
     expect(rematerialized).toBeGreaterThanOrEqual(11);
   });

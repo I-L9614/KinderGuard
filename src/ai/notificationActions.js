@@ -41,7 +41,7 @@ export const sanitizeNotificationActions = (raw, items) => {
 
 const fail = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 export const runNotificationAction = async (user, a) => {
-  if (!['Admin', 'Manager'].includes(user.role)) throw fail(403, 'אין הרשאה');
+  if (!['Admin'].includes(user.role)) throw fail(403, 'אין הרשאה');
   let status = 200; let payload; const res = { status(c) { status = c; return res; }, json(v) { payload = v; return res; } };
   await updateNotification({ user, params: { id: a.notificationId }, body: { status: a.to }, expectedUpdatedAt: new Date(a.version), expectedKind: a.kind }, res);
   if (status >= 400) throw fail(status, payload?.message || 'הפעולה נכשלה');
@@ -63,7 +63,7 @@ export const loadNotificationItems = async (user, limit = 100) => {
 
 export const createNotificationActionsRouter = ({ client, AiProposal }) => {
   const router = express.Router();
-  router.post('/notifications/propose', asyncHandler(protect), authorizeRoles('Admin', 'Manager'), requireAiAccess, [body('prompt').isString().trim().isLength({ min: 1, max: 2000 }), handleValidation], asyncHandler(async (req, res) => {
+  router.post('/notifications/propose', asyncHandler(protect), authorizeRoles('Admin'), requireAiAccess, [body('prompt').isString().trim().isLength({ min: 1, max: 2000 }), handleValidation], asyncHandler(async (req, res) => {
     const adminId = getAdminId(req.user);
     const items = await loadNotificationItems(req.user);
     const context = { notifications: items.map((i) => ({ id: i.id, kind: i.kind, branch: i.branchName, subject: i.subject, status: i.status })) };
