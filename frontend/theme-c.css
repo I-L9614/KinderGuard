@@ -1,0 +1,229 @@
+/* KinderGuard theme C (colorful): selected design, applied over the base styles.
+   Palette: ink #10231f, lime #c8f169, soft grey-green background, 28px rounded cards, pill navigation. */
+:root{--ink:#10231f;--muted:#6b7d78;--teal:#10231f;--teal-dark:#10231f;--line:#e6ece7;--surface:#fff;--good:#2c5d12;--warning:#7a5200;--danger:#932d1b;--lime:#c8f169;--lime-soft:#dff5c4;--pink:#ffd9cf;--sky:#d8e8ff;--amber:#ffe9b8;--bg:#eef2ee;--shadow:none;font-family:Assistant,'Segoe UI','Noto Sans Hebrew',Arial,sans-serif;color:#10231f;background:#eef2ee}
+body{background:#eef2ee;color:var(--ink)}
+button,input,select,textarea{font-family:inherit}
+button:hover{transform:none}
+button:active:not(:disabled){transform:scale(.97);filter:brightness(.94)}
+/* top bar: floating white pill */
+.topbar,.topbar[class]{background:#fff;color:var(--ink);border:0;box-shadow:none;backdrop-filter:none;border-radius:99px;margin:20px auto 0;width:min(1240px,calc(100% - 32px));min-height:64px;padding:8px 12px 8px 18px;gap:14px;position:sticky;top:12px;z-index:6}
+.topbar .brand h1{color:var(--ink);font-size:18px;font-weight:800;letter-spacing:-.3px}
+.topbar .brand p{color:#7a8c87;font-size:11px}
+.brand-mark{width:40px;height:40px;border-radius:13px;box-shadow:none;background:#10231f}
+.topbar .nav{gap:3px;align-self:center;margin-inline-end:auto;min-width:0}
+.topbar .nav button{display:flex;align-items:center;gap:7px;height:42px;min-height:42px;padding:0 15px;border-radius:99px;border:0;border-bottom:0;background:transparent;color:#5b6e69;font-size:14.5px;font-weight:700}
+.topbar .nav button:hover{background:#eef2ee;color:var(--ink)}
+.topbar .nav button.selected{background:#10231f;color:#fff;border:0}
+.topbar .nav button.selected .nav-ico{color:var(--lime)}
+.topbar .nav-count{background:#c0392b;color:#fff;min-width:19px;height:19px;border-radius:10px;font-size:11px}
+.topbar .nav button.selected .nav-count{background:var(--lime);color:#10231f}
+.topbar .user-menu{color:var(--ink);border-inline-start:0;padding-inline-start:0}
+.topbar .user-menu small{color:#7a8c87}
+.topbar .user-avatar,.user-avatar{background:var(--lime);color:#10231f;font-weight:800}
+.topbar .icon-button{color:#5b6e69}.topbar .icon-button:hover{background:#eef2ee;color:var(--ink)}
+.topbar .update-button{background:#fff;border:1px solid var(--line);color:#5b6e69}.topbar .update-button:hover{background:#eef2ee;color:var(--ink)}
+.topbar .update-button.has-update{background:var(--amber);border-color:#f0d9a8;color:#7a5200}
+.topbar .update-dot{border-color:#fff}
+.content{width:min(1240px,100%);padding:26px 34px 56px}
+/* hero + titles */
+.welcome-row{position:relative;overflow:hidden;background:#10231f;color:#fff;border-radius:28px;padding:34px 36px;margin-bottom:16px}
+.welcome-row:after{content:"";position:absolute;left:-60px;bottom:-90px;width:260px;height:260px;border-radius:50%;background:#1d4a3e;pointer-events:none}
+.welcome-row>*{position:relative;z-index:1}
+.welcome-row h2{color:#fff;font-size:38px;font-weight:800;letter-spacing:-.8px;line-height:1.15}
+.welcome-row p{color:#a9bdb7;font-size:16px}
+.welcome-row .eyebrow{color:var(--lime)}
+.welcome-row .primary{background:var(--lime);color:#10231f}
+.eyebrow{color:#3d7a5f;font-weight:800;letter-spacing:.04em}
+.branch-title h2,.section-heading h3,.panel h3{font-weight:800}
+.branch-title h2{font-size:34px;letter-spacing:-.8px}
+/* buttons */
+.primary,.secondary,button.danger{border-radius:99px;padding:11px 20px;font-weight:800;box-shadow:none}
+.primary{background:#10231f;color:#fff}.primary:hover{background:#1d3a33;box-shadow:none}
+.secondary{background:#fff;color:var(--ink);border:1px solid #d9e2dc}.secondary:hover{background:#eef2ee}
+.back-link,.file-link,.link-button{color:#3d7a5f}
+/* stat tiles */
+.stats-grid{gap:16px;margin:16px 0 22px}
+.stat-card{border:0;border-radius:28px;padding:22px;min-height:118px;background:#fff;box-shadow:none;flex-direction:row-reverse;justify-content:space-between;align-items:center;gap:12px}
+.stat-card>div{flex:1;text-align:start}
+.stat-card strong{font-size:46px;font-weight:800;letter-spacing:-1.5px;line-height:1}
+.stat-card small{font-size:13px;color:#41564f;font-weight:600;margin-top:8px}
+.stat-card:nth-child(1){background:var(--lime)}.stat-card:nth-child(2){background:var(--amber)}.stat-card:nth-child(3){background:var(--pink)}.stat-card:nth-child(4){background:var(--sky)}
+.stat-card:nth-child(n+5){background:#fff}
+.stat-icon,.stat-icon.teal,.stat-icon.amber,.stat-icon.coral,.stat-icon.blue{background:#ffffffb3;color:#10231f;border-radius:50%;width:42px;height:42px}
+.compact .stat-card{min-height:92px;padding:16px 20px}.compact .stat-card strong{font-size:32px}
+.clickable:hover,.branch-card:hover{transform:none;box-shadow:0 0 0 2px #10231f}
+/* cards and panels */
+.panel{border:0;border-radius:28px;padding:26px;box-shadow:none}
+.branch-grid{gap:16px}
+.branch-card{border:0;border-radius:28px;padding:22px;box-shadow:none}
+.branch-symbol,.approval-icon{background:#eef2ee;color:#10231f;border-radius:16px}
+.branch-card-bottom{border-top-color:#edf1ed}
+.status-pill{padding:6px 14px;font-size:12.5px;border-radius:99px}
+.status-pill.good{background:var(--lime-soft);color:#2c5d12}
+.status-pill.warning{background:var(--amber);color:#7a5200}
+.status-pill.danger{background:var(--pink);color:#932d1b}
+.status-pill.neutral{background:#eef2ee;color:#41564f}
+#licenseList .approval-card{border:0;background:#f7f9f7;border-radius:22px;box-shadow:none}
+.license-row,.task-row{border-bottom-color:#edf1ed}
+.task-check{border-radius:8px;border-color:#c3d0cb}.task-check.done{background:#10231f;border-color:#10231f}
+.search-input{border-radius:99px;background:#fff;border:1px solid #d9e2dc;padding:12px 18px}.search-input:focus{border-color:#10231f;box-shadow:0 0 0 3px #c8f16966}
+.rent-authority-filter select{border-color:#10231f;background:#fff;border-radius:99px}
+input,select,textarea{accent-color:#10231f}
+.tabs{background:#eef2ee;border-radius:99px}.tab{border-radius:99px}.tab.selected,.tab.active{background:#10231f;color:#fff}
+.task-filters button.selected,.task-filters button.active,.report-tabs button.selected,.report-tabs button.active,.type-chip.selected,.type-chip.active{background:#10231f;color:#fff}
+.modal{border-radius:28px}
+.toast{border-radius:99px}
+.authority-total{color:#3d7a5f}
+/* login */
+.auth-layout{max-width:1100px;margin:4vh auto;gap:40px;align-items:stretch}
+.auth-intro{background:#10231f;color:#fff;border-radius:28px;padding:44px;position:relative;overflow:hidden;display:flex;flex-direction:column;justify-content:center}
+.auth-intro:after{content:"";position:absolute;left:-70px;bottom:-90px;width:280px;height:280px;border-radius:50%;background:#1d4a3e}
+.auth-intro>*{position:relative;z-index:1}
+.auth-intro .eyebrow{color:var(--lime)}
+.auth-intro h2{color:#fff}.auth-intro h2 span{color:var(--lime)}
+.auth-intro p{color:#a9bdb7}
+.auth-decoration span{background:#ffffff1f;color:#fff}.auth-decoration span:first-child{background:var(--lime);color:#10231f}
+.auth-panel{align-self:center;border-radius:28px}
+.auth-panel input{border-radius:16px;border:1px solid #d9e2dc;background:#fff}.auth-panel input:focus{outline:0;border-color:#10231f;box-shadow:0 0 0 3px #c8f16977}
+.auth-panel .primary.full{background:#10231f;color:#fff;min-height:48px}
+/* footer */
+.footer{background:transparent;border-top:0;color:#7a8c87}
+/* phone: compact comfortable sizes, bottom tab bar in the same style */
+@media(max-width:900px){.topbar{border-radius:28px}.content{padding:20px 16px 48px}}
+@media(max-width:620px){
+  .topbar,.topbar[class]{margin:10px auto 0;width:calc(100% - 20px);top:6px;min-height:54px;padding:6px 10px 6px 12px;border-radius:99px;position:sticky}
+  .brand-mark{width:34px;height:34px;border-radius:11px}
+  .topbar .brand h1{font-size:16px}.topbar .brand p{display:none}
+  .content{padding:14px 12px 40px}
+  .welcome-row{padding:22px 20px;border-radius:24px;flex-direction:column;align-items:stretch;gap:14px}
+  .welcome-row h2{font-size:26px}.welcome-row p{font-size:14px}
+  .branch-title h2{font-size:24px}
+  .stats-grid{gap:10px;margin:12px 0 20px}
+  .stat-card{border-radius:22px;padding:14px 16px;min-height:88px;flex-direction:column;align-items:flex-start;justify-content:space-between;gap:6px}
+  .stat-card strong{font-size:34px}.stat-card small{font-size:12px;margin-top:2px}
+  .stat-icon{display:none}
+  .panel,.branch-card{border-radius:24px;padding:18px}
+  .mobile-tabbar{left:10px;right:10px;bottom:calc(10px + env(safe-area-inset-bottom));border:0;border-radius:99px;background:#fff;box-shadow:0 8px 28px #10231f26;padding:6px}
+  .mobile-tabbar button{min-height:48px;color:#5b6e69;border-radius:99px}
+  .mobile-tabbar button.selected{color:#fff;background:#10231f}
+  .mobile-tabbar button.selected i{background:transparent;color:var(--lime)}
+  .mobile-tabbar em{background:#c0392b}
+  body.has-mobile-nav{padding-bottom:calc(88px + env(safe-area-inset-bottom))}
+  .mobile-more{border:0;border-radius:24px;bottom:calc(78px + env(safe-area-inset-bottom));box-shadow:0 8px 28px #10231f33}
+  .mobile-more button.selected{background:#10231f;color:#fff}
+  .toast{bottom:calc(98px + env(safe-area-inset-bottom))}
+  .auth-layout{margin:2vh auto;gap:14px}.auth-intro{padding:26px 22px;border-radius:24px}.auth-intro h2{font-size:30px}.auth-decoration{display:none}
+}
+@media(min-width:621px){.mobile-tabbar{display:none}}
+@media(max-width:620px){
+  .auth-intro{padding:22px 20px}.auth-intro h2{font-size:26px;line-height:1.2}.auth-intro p{font-size:14px;margin:8px 0 0}.auth-intro:after{width:180px;height:180px}
+  .auth-panel{padding:20px}
+}
+/* Desktop top bar: same structure as the previous bar (full-width, icon beside each label, active tab marker, count badges),
+   in the new palette: ink bar, lime active marker. Phone keeps the compact pill above. */
+@media(min-width:621px){
+  .topbar,.topbar[class]{width:auto;margin:0;top:0;border-radius:0;min-height:74px;padding:0 max(26px,calc((100vw - 1240px)/2));background:#10231f;color:#fff;gap:18px}
+  .topbar .brand h1{color:#fff}.topbar .brand p{color:#9bb5ad}
+  .topbar .nav{align-self:stretch;gap:2px}
+  .topbar .nav button{height:100%;min-height:74px;padding:0 15px;border-radius:0;border-bottom:3px solid transparent;color:#b6cbc4;font-size:14px;background:transparent}
+  .topbar .nav button:hover{background:#ffffff0f;color:#fff}
+  .topbar .nav button.selected{background:linear-gradient(#ffffff00,#c8f16124);color:#fff;border-bottom:3px solid var(--lime)}
+  .topbar .nav button.selected .nav-ico{color:var(--lime)}
+  .topbar .nav-count{background:#e0533f;color:#fff}
+  .topbar .nav button.selected .nav-count{background:#e0533f;color:#fff}
+  .topbar .user-menu{color:#fff;padding-inline-start:16px;border-inline-start:1px solid #ffffff25}
+  .topbar .user-menu small{color:#9bb5ad}
+  .topbar .icon-button{color:#b6cbc4}.topbar .icon-button:hover{background:#ffffff14;color:#fff}
+  .topbar .update-button{background:#ffffff14;border-color:#ffffff30;color:#e3efe9}.topbar .update-button:hover{background:#ffffff22;color:#fff}
+  .topbar .update-button.has-update{background:#c8f16126;border-color:#c8f16188;color:var(--lime)}
+  .topbar .update-dot{border-color:#10231f}
+  .topbar .brand-mark{background:#10231f;box-shadow:0 0 0 1px #c8f16155}
+  .content{padding-top:26px}
+}
+/* rent summary tiles: the number sits in the icon slot, the label in <strong> */
+#rentUpcomingCard .stat-icon,#rentChecksCard .stat-icon,#rentAlertsCard .stat-icon{background:none;width:auto;height:auto;font-size:46px;font-weight:800;letter-spacing:-1.5px;line-height:1}
+#rentUpcomingCard strong,#rentChecksCard strong,#rentAlertsCard strong{font-size:16px;font-weight:800;letter-spacing:0;line-height:1.3}
+#rentAnnualCard strong{font-size:36px}
+#rentAnnualCard .stat-icon{font-size:20px}
+@media(max-width:620px){
+  #rentUpcomingCard .stat-icon,#rentChecksCard .stat-icon,#rentAlertsCard .stat-icon{display:block;font-size:34px}
+  #rentAnnualCard .stat-icon{display:none}#rentAnnualCard strong{font-size:26px}
+  #rentUpcomingCard strong,#rentChecksCard strong,#rentAlertsCard strong{font-size:14px}
+  .stats-grid .stat-card{order:0}
+}
+/* ===== Dashboard: layout of the selected design (hero + 2x2 tiles, branch list + tasks panel) ===== */
+.dash{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:16px}
+.dash>*{margin:0!important}
+.dash-hero{grid-column:span 7;min-height:300px;padding:38px;display:flex;align-items:center;border-radius:28px}
+.dash-hero h2{font-size:52px;line-height:1.08;letter-spacing:-1.2px;margin:12px 0 14px}
+.dash-hero p{max-width:420px;font-size:17px;line-height:1.6}
+.dash-hero .eyebrow{color:var(--lime);font-size:14px}
+.hero-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}
+.dash-hero .hero-actions .primary{background:var(--lime);color:#10231f;padding:13px 26px;font-size:15px}
+.dash-hero .hero-actions .secondary{background:#ffffff1a;color:#fff;border:0;padding:13px 22px}
+.dash-stats{grid-column:span 5;display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.dash-stats .stat-card{flex-direction:column;align-items:stretch;justify-content:space-between;min-height:142px;padding:22px;gap:0}
+.dash-stats .stat-card>div{display:flex;flex-direction:column-reverse;justify-content:space-between;flex:1;gap:10px}
+.dash-stats .stat-card strong{font-size:58px;letter-spacing:-2px}
+.dash-stats .stat-card small{font-size:15px;margin:0;color:#10231f;font-weight:600}
+.dash-stats .stat-icon{display:none}
+.dash-stats .stat-card:nth-child(1){background:var(--lime)}
+.dash-stats .stat-card:nth-child(2){background:#fff}
+.dash-stats .stat-card:nth-child(3){background:var(--pink)}
+.dash-stats .stat-card:nth-child(4){background:var(--sky)}
+.dash-stats .stat-card.selected{box-shadow:0 0 0 3px #10231f}
+.dash-branches{grid-column:span 8}
+.dash-tasks{grid-column:span 4;align-self:start}
+.dash-branches .section-heading h3,.dash-tasks .section-heading h3{font-size:22px}
+.dash-branches .search-row{margin:0 0 6px}.dash-branches .search-input{max-width:none}
+.dash-branches .branch-grid{display:block}
+.dash-branches .branch-card{display:grid;grid-template-columns:46px minmax(0,1fr) auto auto;grid-template-areas:"sym name sig act" "sym addr sig act" "sym meta comp act";column-gap:14px;row-gap:1px;align-items:center;width:100%;background:transparent;border:0;border-top:1px solid #edf1ed;border-radius:0;padding:13px 0;text-align:start;cursor:pointer}
+.dash-branches .branch-card:hover{box-shadow:none;background:#f7f9f7}
+.dash-branches .branch-card-top{display:contents}
+.dash-branches .branch-symbol{grid-area:sym;width:46px;height:46px;border-radius:16px;font-size:18px;font-weight:800;background:#eef2ee}
+.dash-branches .branch-card-actions{grid-area:act;display:flex;gap:2px}
+.dash-branches .branch-card h3{grid-area:name;margin:0;font-size:17px}
+.dash-branches .branch-card p{grid-area:addr;height:auto;margin:0;font-size:13px}
+.dash-branches .branch-card p.small-text{grid-area:meta;margin:0;font-size:12px}
+.dash-branches .branch-card-bottom{grid-area:sig;border:0;margin:0;padding:0;justify-self:end}
+.dash-branches .branch-card-bottom>span:first-child{display:none}
+.dash-branches .complete-row{grid-area:comp;margin:0;padding:0;border:0;justify-self:end}
+.complete-pill{border-radius:99px;font-weight:700}
+.dash-task{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid #edf1ed;cursor:pointer;font-weight:600;font-size:15px}
+.dash-task:hover{background:#f7f9f7}
+.dash-task small{display:block;color:#7a8c87;font-weight:400;font-size:12px}
+.dash-check{flex:none;width:24px;height:24px;border-radius:8px;border:2px solid #c3d0cb}
+@media(max-width:1000px){.dash-hero,.dash-stats,.dash-branches,.dash-tasks{grid-column:1/-1}.dash-hero h2{font-size:40px}.dash-tasks{order:5}}
+@media(max-width:620px){
+  .dash{gap:10px}
+  .dash-hero{min-height:0;padding:22px 20px}
+  .dash-hero h2{font-size:30px;margin:8px 0 8px}.dash-hero p{font-size:14px}
+  .hero-actions{margin-top:14px}.dash-hero .hero-actions .primary,.dash-hero .hero-actions .secondary{padding:11px 18px;font-size:14px;min-height:44px;flex:1}
+  .dash-stats{gap:10px}
+  .dash-stats .stat-card{min-height:96px;padding:14px 16px;border-radius:22px}
+  .dash-stats .stat-card strong{font-size:38px}.dash-stats .stat-card small{font-size:13px}
+  .dash-branches .branch-card{grid-template-columns:42px minmax(0,1fr) auto;grid-template-areas:"sym name act" "sym addr act" "sym meta act" "sig sig sig" "comp comp comp";}
+  .dash-branches .branch-symbol{width:42px;height:42px}
+  .dash-branches .branch-card-bottom,.dash-branches .complete-row{justify-self:start;margin-top:4px}
+}
+/* phone: every filter chip reachable (wrap instead of a clipped scroll row) */
+@media(max-width:620px){
+  .task-filters{flex-wrap:wrap!important;overflow:visible!important}
+  .task-filters button{flex:1 1 auto}
+}
+/* ===== Branch page: score / details / needs-care cards from the selected design ===== */
+.branch-top{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:16px}
+.branch-top>*{margin:0!important;border-radius:28px;padding:26px;min-width:0}
+.branch-card-score{background:var(--lime);display:flex;flex-direction:column;justify-content:space-between;gap:10px}
+.branch-card-score small{font-size:16px;font-weight:800}
+.branch-card-score strong{font-size:64px;line-height:1;letter-spacing:-2px;font-weight:800}
+.score-bar{height:10px;border-radius:99px;background:#10231f26;overflow:hidden}.score-bar i{display:block;height:100%;background:#10231f;border-radius:99px}
+.score-meta{display:flex;gap:12px;flex-wrap:wrap;font-size:13px;font-weight:700;color:#2c4a12}
+.branch-card-care{background:var(--pink)}
+.branch-card-care.ok{background:var(--lime-soft)}
+.branch-card-care h3{margin:0 0 8px;font-size:22px;font-weight:800}
+.branch-card-care p{margin:0 0 16px;color:#41564f;line-height:1.55}
+.branch-contact{background:#fff}
+@media(max-width:1000px){.branch-top{grid-template-columns:1fr}}
+@media(max-width:620px){.branch-top{gap:10px}.branch-top>*{padding:18px;border-radius:22px}.branch-card-score strong{font-size:44px}}
+@media(max-width:620px){.dash-branches .section-heading p{display:none}.dash-hero p{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}}

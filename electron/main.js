@@ -72,19 +72,14 @@ const setupUpdates = async () => {
 };
 
 const createTrayIcon = () => {
-  // Approved KinderGuard v2 logo: dark teal square, mint shield, white K, amber dot.
-  // Keep in sync with build/icon.svg.
+  // KinderGuard logo: dark square, lime shield, white K, lime dot. Keep in sync with build/icon.svg.
   const canvas = `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="256" height="256">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0f3d4a"/><stop offset="1" stop-color="#051c26"/></linearGradient>
-    <linearGradient id="mt" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5eead4"/><stop offset="1" stop-color="#14a89a"/></linearGradient>
-  </defs>
-  <rect width="512" height="512" rx="115" fill="url(#bg)"/>
-  <path d="M256 84 L392 130 V250 C392 328 336 386 256 428 C176 386 120 328 120 250 V130 Z" fill="none" stroke="url(#mt)" stroke-width="22" stroke-linejoin="round"/>
-  <path d="M214 180 V328" stroke="#fff" stroke-width="26" stroke-linecap="round"/>
-  <path d="M300 180 L226 254 L304 328" stroke="#fff" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <circle cx="306" cy="176" r="19" fill="#fbbf24"/>
+  <rect width="512" height="512" rx="115" fill="#10231f"/>
+  <path d="M256 84 L392 130 V250 C392 328 336 386 256 428 C176 386 120 328 120 250 V130 Z" fill="none" stroke="#c8f169" stroke-width="24" stroke-linejoin="round"/>
+  <path d="M214 180 V328" stroke="#fff" stroke-width="28" stroke-linecap="round"/>
+  <path d="M300 180 L226 254 L304 328" stroke="#fff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <circle cx="306" cy="176" r="19" fill="#c8f169"/>
 </svg>`;
   return nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(canvas).toString('base64')}`).resize({ width: 32, height: 32 });
 };
