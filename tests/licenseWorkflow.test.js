@@ -48,7 +48,17 @@ describe('Branch permit workflow', () => {
     expect(alerts.body.some((alert) => alert.licenseId._id === first.body._id && alert.triggerDays === 0)).toBe(true);
     await request(app).patch(`/api/notifications/${alerts.body[0]._id}`).set('Authorization', `Bearer ${token}`).send({ status: 'In_Progress' }).expect(200);
     const future = new Date(today); future.setDate(future.getDate() + 365);
-    const renewal = await create(future.toISOString().slice(0, 10)).expect(201);
+    // Renewal is never silent: without an explicit confirmation the replace is refused
+    // with the existing record's details, and nothing changes.
+    const refused = await create(future.toISOString().slice(0, 10)).expect(409);
+    expect(refused.body.code).toBe('renewal_required');
+    expect(refused.body.existing.id).toBe(first.body._id);
+    expect(await License.findById(first.body._id)).toMatchObject({ lifecycle: 'Active' });
+    // A confirmation pinned to a record the user never reviewed is refused too.
+    const stale = await create(future.toISOString().slice(0, 10)).field('confirmRenewal', 'true').field('renewalOf', '000000000000000000000000').expect(409);
+    expect(stale.body.code).toBe('renewal_conflict');
+    expect(await License.findById(first.body._id)).toMatchObject({ lifecycle: 'Active' });
+    const renewal = await create(future.toISOString().slice(0, 10)).field('confirmRenewal', 'true').field('renewalOf', first.body._id).expect(201);
     const history = await request(app).get(`/api/licenses/${renewal.body._id}/history`).set('Authorization', `Bearer ${token}`).expect(200);
     expect(history.body).toHaveLength(2);
     expect(history.body.some((license) => license.lifecycle === 'Replaced')).toBe(true);
@@ -126,13 +136,28 @@ describe('Branch permit workflow', () => {
     expect(response.body.message).toContain('PDF');
   });
 
+  it('fails closed (503) when the live unique Active index is missing, and creates nothing', async () => {
+    const ownType = await request(app).post('/api/license-types').set('Authorization', `Bearer ${token}`).send({ name: 'אישור גדר', branchId: null }).expect(201);
+    const issueDate = israelToday().toISOString().slice(0, 10);
+    await License.collection.dropIndex('branchId_1_licenseTypeId_1');
+    try {
+      const res = await request(app).post('/api/licenses').set('Authorization', `Bearer ${token}`)
+        .field('branchId', branchId).field('licenseTypeId', ownType.body._id).field('issueDate', issueDate).field('expiryDate', issueDate).expect(503);
+      expect(res.body.message).toMatch(/חסרה הגנה במסד הנתונים/);
+      expect(await License.countDocuments({ licenseTypeId: ownType.body._id })).toBe(0);
+    } finally { await License.syncIndexes(); await License.init(); }
+    await request(app).post('/api/licenses').set('Authorization', `Bearer ${token}`)
+      .field('branchId', branchId).field('licenseTypeId', ownType.body._id).field('issueDate', issueDate).field('expiryDate', issueDate).expect(201);
+  });
+
   it('rejects a spoofed upload whose bytes do not match the declared type', async () => {
     const issueDate = israelToday().toISOString().slice(0, 10);
+    const ownType = await request(app).post('/api/license-types').set('Authorization', `Bearer ${token}`).send({ name: 'אישור זיוף', branchId: null }).expect(201);
     const response = await request(app)
       .post('/api/licenses')
       .set('Authorization', `Bearer ${token}`)
       .field('branchId', branchId)
-      .field('licenseTypeId', licenseTypeId)
+      .field('licenseTypeId', ownType.body._id)
       .field('issueDate', issueDate)
       .field('expiryDate', issueDate)
       .attach('file', Buffer.from('<script>alert(1)</script>'), { filename: 'pretend.png', contentType: 'image/png' })
@@ -143,11 +168,12 @@ describe('Branch permit workflow', () => {
   it('accepts a genuine PDF upload and stores it privately', async () => {
     const issueDate = israelToday().toISOString().slice(0, 10);
     const pdf = Buffer.concat([Buffer.from('%PDF-1.4 fake-body-for-test'), Buffer.alloc(16, 0)]);
+    const ownType = await request(app).post('/api/license-types').set('Authorization', `Bearer ${token}`).send({ name: 'אישור מסמך אמיתי', branchId: null }).expect(201);
     const response = await request(app)
       .post('/api/licenses')
       .set('Authorization', `Bearer ${token}`)
       .field('branchId', branchId)
-      .field('licenseTypeId', licenseTypeId)
+      .field('licenseTypeId', ownType.body._id)
       .field('issueDate', issueDate)
       .field('expiryDate', issueDate)
       .attach('file', pdf, { filename: 'permit.pdf', contentType: 'application/pdf' })

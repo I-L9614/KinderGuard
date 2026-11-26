@@ -4,6 +4,9 @@ import LoginLockout from '../models/LoginLockout.js';
 import logger from '../utils/logger.js';
 import { getAdminId } from '../utils/access.js';
 import { issueTokensForUser } from './authController.js';
+import { maskEmail } from '../utils/passwordPolicy.js';
+import { nameKey, nameTaken } from '../utils/nameKey.js';
+import { verifyNameKeyIndex, settleModelInit } from '../utils/nameKeyIndex.js';
 
 // Per-account lockout: after LOCKOUT_THRESHOLD consecutive failed logins the
 // account is blocked for a full LOCKOUT_DURATION_MS, even for the correct
@@ -70,16 +73,26 @@ export const registerUser = async (req, res) => {
 };
 
 export const createManagedUser = async (req, res) => {
-  const { name, email, password, role = 'Manager', accessibleBranches = [] } = req.body;
+  const { name, email, password, role = 'Manager', accessibleBranches = [], aiEnabled = false } = req.body;
+  const ai = aiEnabled === true;
   if (!['Admin', 'Manager'].includes(role)) return res.status(400).json({ message: 'תפקיד משתמש לא תקין' });
   if (await User.exists({ email })) return res.status(400).json({ message: 'כתובת הדוא״ל כבר קיימת' });
+  // Display names double as login identifiers, so they must be unique across
+  // the whole system (login has no account picker). Normalized comparison:
+  // extra spaces or different casing cannot sneak in a duplicate, and the
+  // unique index on nameKey closes the race between this check and the write.
+  // The application-level check alone loses a concurrent-create race; the
+  // unique index is what closes it, so refuse while it is not provably there.
+  await settleModelInit(User);
+  if (!(await verifyNameKeyIndex())) return res.status(503).json({ message: 'המערכת משלימה תחזוקה רגעית. נסו שוב בעוד דקה.' });
+  if (await nameTaken(User, name)) return res.status(400).json({ message: 'השם הזה כבר תפוס. בחרו שם אחר.' });
 
   const adminId = getAdminId(req.user);
 
   if (role === 'Admin') {
     // Co-admin: linked to the same account (adminId), so they see and manage the exact
     // same branches, licenses and rent data. Full access to every branch by role.
-    const user = await User.create({ name, email, password, role: 'Admin', adminId, accessibleBranches: [] });
+    const user = await User.create({ name, email, password, role: 'Admin', adminId, accessibleBranches: [], aiEnabled: ai });
     return res.status(201).json({ id: user._id, name: user.name, email: user.email, role: user.role });
   }
 
@@ -88,31 +101,61 @@ export const createManagedUser = async (req, res) => {
     return res.status(400).json({ message: 'אחד או יותר מהסניפים שנבחרו אינם שייכים לחשבון' });
   }
 
-  const user = await User.create({ name, email, password, role: 'Manager', adminId, accessibleBranches: branches.map((b) => b._id) });
+  const user = await User.create({ name, email, password, role: 'Manager', adminId, accessibleBranches: branches.map((b) => b._id), aiEnabled: ai });
   res.status(201).json({ id: user._id, name: user.name, email: user.email, role: user.role, accessibleBranches: user.accessibleBranches });
 };
 
 export const listManagedUsers = async (req, res) => {
-  const users = await User.find({ adminId: getAdminId(req.user), _id: { $ne: getAdminId(req.user) } }).select('name email role accessibleBranches createdAt').populate('accessibleBranches', 'name');
+  const users = await User.find({ adminId: getAdminId(req.user), _id: { $ne: getAdminId(req.user) } }).select('name email role aiEnabled accessibleBranches createdAt').populate('accessibleBranches', 'name');
   res.json(users);
 };
 
 export const loginUser = async (req, res) => {
-  const { email, password } = req.body;
-  const normalizedEmail = String(email).toLowerCase().trim();
+  const { password } = req.body;
+  // Name-or-email login: newer clients send `identifier`; older installed
+  // clients still send `email`. Anything with an @ is treated as an email,
+  // everything else as a display name in canonical form (utils/nameKey).
+  const rawIdentifier = String(req.body.identifier ?? req.body.email ?? '');
+  const isEmail = rawIdentifier.includes('@');
+  const normalizedIdentifier = isEmail ? rawIdentifier.trim().toLowerCase() : nameKey(rawIdentifier);
+  if (!normalizedIdentifier) {
+    return res.status(400).json({ message: 'נא להזין שם או כתובת דוא״ל' });
+  }
+  // The account is resolved before the lockout check so the lockout key
+  // follows the ACCOUNT: typing the same person by name or by email shares
+  // one counter, while an unknown identifier gets its own key.
+  let user = isEmail
+    ? await User.findOne({ email: normalizedIdentifier })
+    : await User.findOne({ nameKey: normalizedIdentifier });
+  if (!user && !isEmail) {
+    // Accounts created before nameKey existed: match the stored name with the
+    // same normalization, then backfill the key on the successful path below.
+    const storedForm = rawIdentifier.normalize('NFC').trim().replace(/\s+/g, ' ');
+    const matching = (await User.find({ name: storedForm })).filter((c) => nameKey(c.name) === normalizedIdentifier);
+    // Two legacy accounts can share a name (the schema never enforced
+    // uniqueness): never guess between them - email still works for both.
+    if (matching.length > 1) {
+      return res.status(400).json({ message: 'השם משויך ליותר מחשבון אחד. התחברו עם כתובת הדוא״ל.' });
+    }
+    if (matching.length === 1) user = matching[0];
+  }
+  const lockKey = user ? `user:${user._id}` : `id:${normalizedIdentifier}`;
   const now = new Date();
-  const lock = await LoginLockout.findOne({ email: normalizedEmail }).lean();
+  const lock = await LoginLockout.findOne({ email: lockKey }).lean();
   if (lock?.lockedUntil && lock.lockedUntil > now) {
-    logger.warn(`Blocked login attempt on locked account: ${normalizedEmail}`);
+    logger.warn('Blocked login attempt on locked account');
     return res.status(429).json({ message: LOCKED_MESSAGE });
   }
-  const user = await User.findOne({ email: normalizedEmail });
   if (!user || !(await user.comparePassword(password))) {
-    logger.warn(`Failed login for email: ${normalizedEmail}`);
-    await recordFailedLogin(normalizedEmail, now);
-    return res.status(401).json({ message: 'כתובת דוא״ל או סיסמה שגויות' });
+    logger.warn(`Failed login for identifier: ${isEmail ? maskEmail(normalizedIdentifier) : `${normalizedIdentifier.slice(0, 1)}***`}`);
+    await recordFailedLogin(lockKey, now);
+    return res.status(401).json({ message: 'פרטי ההתחברות שגויים' });
   }
-  if (lock) await LoginLockout.updateOne({ email: normalizedEmail }, { $set: { failures: [], lockedUntil: null } });
+  if (lock) await LoginLockout.updateOne({ email: lockKey }, { $set: { failures: [], lockedUntil: null } });
+  if (!user.nameKey) {
+    user.nameKey = nameKey(user.name);
+    try { await user.save(); } catch (e) { /* a racing save set the same key */ logger.warn(`nameKey backfill skipped: ${e.message}`); }
+  }
   res.json({ id: user._id, name: user.name, email: user.email, role: user.role, token: await issueTokensForUser(res, user) });
 };
 

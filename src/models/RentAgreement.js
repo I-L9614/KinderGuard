@@ -9,6 +9,11 @@ const rentAgreementSchema = new mongoose.Schema({
   adminId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', required: true, index: true },
   authorityId: { type: mongoose.Schema.Types.ObjectId, ref: 'Authority', required: true, index: true },
+  // Denormalized display names captured at creation: history (closed
+  // agreements, lists) keeps rendering after a branch or authority is
+  // deleted, when the populated refs go null.
+  branchName: { type: String, default: '' },
+  authorityName: { type: String, default: '' },
   // incoming: the authority pays rent for a daycare (the original case).
   // outgoing: the account pays rent to the authority (e.g. office landlords).
   direction: { type: String, enum: ['incoming', 'outgoing'], default: 'outgoing', index: true },
@@ -35,8 +40,23 @@ const rentAgreementSchema = new mongoose.Schema({
     seriesStartDate: { type: Date },
     seriesEndDate: { type: Date },
   },
-  status: { type: String, enum: ['Active', 'Closed'], default: 'Active', index: true },
+  status: { type: String, enum: ['Active', 'Closed', 'Pending_Setup'], default: 'Active', index: true },
   closedAt: { type: Date, default: null },
+  // A guarded (AI-path) create starts as Pending_Setup + pendingGuard: rows in
+  // that state are invisible to every consumer that filters status:'Active'
+  // (reports, counts, AI lists, reminders, schedulers, groups) and have no
+  // payments yet. The commit point flips them to Active and clears the flag
+  // atomically BEFORE the schedule is materialized; success is gated on that
+  // commit. A row still flagged never returned success - a crash or a failed
+  // unwind - so the startup/hourly reconcile removes it with any children
+  // (reconcileGuardedAgreementCreates). Plain-UI creates never set either.
+  pendingGuard: { type: Boolean, default: false },
+  // Set by the reconcile sweep when it claims a stale pending row: the claim
+  // unsets pendingGuard atomically, so a writer resuming after the age
+  // threshold finds its commit condition unmatched instead of activating a
+  // row whose children are being deleted. A crash after the claim leaves
+  // this flag so the next pass resumes cleanup.
+  sweepClaim: { type: Boolean, default: false },
   // Rent documents (contracts, approvals from the authority, payment
   // confirmations). Kept fully separate from license/approval documents:
   // different prefix in storage, different routes, admin-only access.
@@ -44,11 +64,13 @@ const rentAgreementSchema = new mongoose.Schema({
     type: [{
       key: { type: String, required: true },
       fileName: { type: String, default: '' },
+      // sha256 of the stored bytes, recorded for files saved through the AI worker. Older and manually uploaded files have none.
+      sha256: { type: String, default: '' },
       uploadedAt: { type: Date, default: Date.now },
       uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     }],
     default: [],
   },
-}, { timestamps: true });
+}, { timestamps: true, optimisticConcurrency: true });
 
 export default mongoose.model('RentAgreement', rentAgreementSchema);

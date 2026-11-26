@@ -23,8 +23,15 @@ export const createLicenseType = async (req, res) => {
   }
   const exists = await LicenseType.exists({ adminId: getAdminId(req.user), branchId, name: name.trim() });
   if (exists) return res.status(409).json({ message: 'סוג אישור בשם זה כבר קיים בהיקף שנבחר' });
-  const type = await LicenseType.create({ adminId: getAdminId(req.user), name, description, branchId });
-  res.status(201).json(type);
+  try {
+    const type = await LicenseType.create({ adminId: getAdminId(req.user), name, description, branchId });
+    res.status(201).json(type);
+  } catch (error) {
+    // Two creations racing past the pre-check: the unique index picks the
+    // winner and the loser gets the same 409 the pre-check would have given.
+    if (error && error.code === 11000) return res.status(409).json({ message: 'סוג אישור בשם זה כבר קיים בהיקף שנבחר' });
+    throw error;
+  }
 };
 
 export const deactivateLicenseType = async (req, res) => {

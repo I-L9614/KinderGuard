@@ -23,6 +23,45 @@ const date = (value) => value ? new Date(value).toLocaleDateString('he-IL', { ti
 // Month arithmetic that clamps to the month end instead of overflowing
 // (Jan 31 + 1 month -> Feb 28, never Mar 3). Mirrors the server scheduler.
 const addMonthsClamped = (d, months) => { const out = new Date(d); const day = out.getDate(); out.setMonth(out.getMonth() + months); if (out.getDate() < day) out.setDate(0); return out; };
+// Session generation: bumped at every auth transition (login, logout, a 401 that ends the session).
+// Work started under an older generation is discarded: its token is never adopted, its response never
+// reaches the UI, and a read is never replayed under a different session.
+let sessionGen = 0;
+const staleError = () => { const e = new Error('הסשן הוחלף'); e.stale = true; e.status = 0; return e; };
+const endSession = () => { sessionGen++; renewing = null; state.user = null; state.token = null; };
+// One refresh at a time, shared by the 10-minute timer, loadApp, the online event and the 401 recovery in api():
+// refresh tokens rotate, so two overlapping refreshes must never race.
+let renewing = null;
+// Held from before a login/logout waits for the refresh until its request is finished: no NEW refresh (timer, online
+// event, 401 recovery) may start in between, or it could reopen the cookie race that the wait just closed.
+let authTransition = false;
+const refreshSession = () => {
+  if (authTransition) { const e = staleError(); return Promise.reject(e); }
+  if (!renewing) {
+    const gen = sessionGen;
+    const p = apiRequest('/api/auth/refresh', { method: 'POST' }, {}).then((r) => {
+      if (gen !== sessionGen) throw staleError();
+      if (!r || !r.token) throw new Error('no token');
+      const pinned = String(state.user?._id || state.user?.id || state.expectUserId || ''); const got = tokenUserId(r.token);
+      if (pinned && got !== pinned) { const e = new Error('חשבון אחר'); e.mismatch = true; e.status = 0; throw e; } // never adopt another account's token
+      state.token = r.token; return r.token;
+    }).finally(() => { if (renewing === p) renewing = null; });
+    renewing = p;
+  }
+  return renewing;
+};
+const accountChanged = () => { endSession(); renderAuth(); toast('החשבון בסשן השתנה. היכנסו מחדש.', 'danger'); };
+const renewToken = () => refreshSession().catch((e) => { if (e.mismatch) accountChanged(); return null; });
+// Before a login or logout request goes out, let any in-flight refresh land first so its Set-Cookie cannot arrive
+// after the new session's cookie. Bounded, and it FAILS CLOSED: false means a refresh is still pending, and the
+// caller must not send the request (a stale response could still overwrite the cookie jar).
+const settleRefresh = async (ms = 5000) => {
+  const p = renewing; if (!p) return true;
+  let timer; await Promise.race([p.catch(() => {}), new Promise((r) => { timer = setTimeout(r, ms); })]); clearTimeout(timer);
+  return !renewing;
+};
+// Every renewal is pinned to the signed-in account: the access token's id claim must match before it is adopted.
+const tokenUserId = (t) => { try { const b = String(t).split('.')[1].replace(/-/g, '+').replace(/_/g, '/'); return String(JSON.parse(atob(b + '='.repeat((4 - (b.length % 4)) % 4))).id || ''); } catch { return ''; } };
 const api = async (url, options = {}) => {
   const headers = { ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}), ...options.headers };
   const method = (options.method || 'GET').toUpperCase();
@@ -30,7 +69,27 @@ const api = async (url, options = {}) => {
   const isUpload = options.body instanceof FormData;
   if (isMutating) updateGuard.mutationStarted({ upload: isUpload });
   try {
-    return await apiRequest(url, options, headers);
+    const gen = sessionGen;
+    try {
+      const out = await apiRequest(url, options, headers);
+      if (gen !== sessionGen) throw staleError();
+      return out;
+    } catch (error) {
+      if (error.stale) throw error;
+      if (gen !== sessionGen) throw staleError();
+      // The access token lasts an hour and is renewed by a 10-minute timer that does not
+      // run while the PC sleeps or is offline. On the first 401 of a data call, renew it
+      // once from the refresh cookie and, for reads only, repeat the call. A failed renewal
+      // surfaces the original error. Auth calls are excluded so a wrong password stays a
+      // wrong password.
+      if (error.status !== 401 || !state.token || String(url).startsWith('/api/auth/')) throw error;
+      const fresh = await renewToken();
+      if (gen !== sessionGen) throw staleError();
+      if (!fresh || isMutating) throw error;
+      const again = await apiRequest(url, options, { ...headers, Authorization: `Bearer ${fresh}` });
+      if (gen !== sessionGen) throw staleError();
+      return again;
+    }
   } finally {
     if (isMutating) updateGuard.mutationFinished({ upload: isUpload });
   }
@@ -41,9 +100,13 @@ const apiRequest = async (url, options, headers) => {
   catch { const error = new Error('לא ניתן להתחבר לשרת. בדקו שהאפליקציה פועלת ושיש חיבור לרשת.'); error.status = 0; throw error; }
   const raw = await response.text();
   let data = {}; try { data = raw ? JSON.parse(raw) : {}; } catch { data = {}; }
-  if (!response.ok) { const error = new Error(data.message || 'הפעולה לא הושלמה. נסו שוב.'); error.status = response.status; error.fields = data.errors || []; throw error; }
+  if (!response.ok) { const error = new Error(data.message || 'הפעולה לא הושלמה. נסו שוב.'); error.status = response.status; error.fields = data.errors || []; error.data = data; throw error; }
   return data;
 };
+// A retry that fails again must visibly differ from "nothing happened": the panel shows when the last attempt ran.
+let lastRetryAt = null;
+const retryNote = () => (lastRetryAt ? `<small class="muted" data-retry-note style="display:block;margin-top:8px">ניסיון אחרון: ${esc(lastRetryAt)}</small>` : '');
+const markRetry = (fn) => () => { lastRetryAt = new Date().toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem' }); return fn(); };
 const toast = (text, kind = 'info') => { const node = document.createElement('div'); node.className = `toast toast-${kind}`; node.textContent = text; document.body.append(node); setTimeout(() => node.remove(), 3600); };
 
 // Two-tone chime played alongside the native desktop notification. WebAudio needs
@@ -71,10 +134,23 @@ const playNotificationSound = () => {
   } catch {}
 };
 
+// Renewal of an existing approval is never silent: the server refuses the first save
+// with the current record's details, and the save only proceeds after the user
+// approves replacing THAT exact record (renewalOf pins it server-side).
+const confirmLicenseRenewal = (formModal, form, existing) => {
+  const r = modal('חידוש אישור קיים', `<div class="form-grid"><p>כבר קיים אישור פעיל מסוג זה לסניף שנבחר${existing.expiryDate ? ` (בתוקף עד ${esc(date(existing.expiryDate))})` : ''}.</p><p class="muted">באישור, האישור הקיים יועבר להיסטוריה והאישור החדש יהיה הפעיל. הבחירה בשדה "מחק גם את המסמך של האישור המוחלף" נשמרת כפי שסימנתם.</p><div class="button-row"><button class="primary" id="confirmRenewal">אישור החלפה וחידוש</button><button class="secondary" data-cancel>ביטול</button></div></div>`);
+  r.wrap.querySelector('[data-cancel]').onclick = r.close;
+  r.wrap.querySelector('#confirmRenewal').onclick = async () => {
+    const f = new FormData(form); f.set('confirmRenewal', 'true'); f.set('renewalOf', existing.id);
+    try { await api('/api/licenses', { method: 'POST', body: f }); r.close(); formModal.close(); toast('האישור חודש והקודם הועבר להיסטוריה.', 'success'); await loadApp(); if (state.branchId) await renderBranch(); }
+    catch (error) { r.close(); toast(error.message, 'danger'); }
+  };
+};
+
 const confirmDeleteLicenseFile = (licenseId, fileName) => {
-  const m = modal('מחיקת מסמך', `<div class="form-grid"><p>למחוק את המסמך <strong>${esc(fileName || '')}</strong>?</p><p class="muted">האישור עצמו, תאריכיו וההיסטוריה נשארים. לא ניתן לשחזר את הקובץ אחרי המחיקה.</p><div class="button-row"><button class="danger" id="confirmDeleteFile">מחיקת המסמך</button><button class="secondary" data-cancel>ביטול</button></div></div>`);
+  const m = modal('מחיקת מסמך', `<div class="form-grid"><p>למחוק את המסמך <strong><bdi dir="ltr">${esc(fileName || '')}</bdi></strong>?</p><p class="muted">האישור עצמו, תאריכיו וההיסטוריה נשארים. לא ניתן לשחזר את הקובץ אחרי המחיקה.</p><div class="button-row"><button class="danger" id="confirmDeleteFile">מחיקת המסמך</button><button class="secondary" data-cancel>ביטול</button></div></div>`);
   m.wrap.querySelector('[data-cancel]').onclick = m.close;
-  m.wrap.querySelector('#confirmDeleteFile').onclick = async () => { try { await api(`/api/licenses/${licenseId}/file`, { method: 'DELETE' }); m.close(); toast('המסמך נמחק', 'success'); await loadApp(); if (state.branchId) await renderBranch(); } catch (error) { toast(error.message, 'danger'); } };
+  m.wrap.querySelector('#confirmDeleteFile').onclick = async () => { try { const r = await api(`/api/licenses/${licenseId}/file`, { method: 'DELETE' }); m.close(); toast((r && r.message) || 'המסמך נמחק', 'success'); await loadApp(); if (state.branchId) await renderBranch(); } catch (error) { toast(error.message, 'danger'); } };
 };
 
 const openLicenseFile = async (licenseId) => {
@@ -95,13 +171,54 @@ const openLicenseFile = async (licenseId) => {
 const renderAuth = () => {
   removeMobileNav();
   headerActions.innerHTML = '';
-  app.innerHTML = `<section class="auth-layout"><div class="auth-intro"><div class="eyebrow">ניהול אישורים למעונות יום</div><h2>כל הסניפים.<br>כל האישורים.<br><span>בלי לפספס חידוש.</span></h2><p>מקום אחד לעקוב אחרי אישורים, מועדי פקיעה ומשימות חידוש.</p><div class="auth-decoration"><span>✓</span><span>30 יום</span><span>7 ימים</span><span>יום הפקיעה</span></div></div><div class="panel auth-panel"><h3 class="auth-title">התחברות</h3><form id="authForm"><label>כתובת דוא״ל<input name="email" type="email" autocomplete="username" required></label><label>סיסמה<input name="password" type="password" autocomplete="current-password" minlength="8" required></label><button class="primary full" type="submit">התחברות</button><p id="authHint" class="muted">התחברו לחשבון KinderGuard שלכם.</p></form></div></section>`;
+  app.innerHTML = `<section class="auth-layout"><div class="auth-intro"><div class="eyebrow">ניהול אישורים למעונות יום</div><h2>כל הסניפים.<br>כל האישורים.<br><span>בלי לפספס חידוש.</span></h2><p>מקום אחד לעקוב אחרי אישורים, מועדי פקיעה ומשימות חידוש.</p><div class="auth-decoration"><span>✓</span><span>30 יום</span><span>7 ימים</span><span>יום הפקיעה</span></div></div><div class="panel auth-panel"><h3 class="auth-title">התחברות</h3><form id="authForm"><label>שם או דוא״ל<input name="identifier" type="text" autocomplete="username" required></label><label>סיסמה<input name="password" type="password" autocomplete="current-password" minlength="8" required></label><button class="primary full" type="submit">התחברות</button><p id="authHint" class="muted">התחברו עם השם שלכם כפי שהוא מופיע במערכת, או עם כתובת הדוא״ל.</p><button type="button" id="forgotLink" class="text-button">שכחתי סיסמה</button></form></div></section>`;
+  document.getElementById('forgotLink').onclick = () => renderForgot();
   document.getElementById('authForm').onsubmit = async (event) => {
     event.preventDefault(); const form = new FormData(event.currentTarget);
     try {
       const endpoint = '/api/users/login';
-      const result = await api(endpoint, { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password') }) });
-      state.token = result.token; await loadApp();
+      if (authTransition) return;
+      authTransition = true;
+      let result;
+      try {
+        sessionGen++; state.user = null; state.token = null; // new session: older work is now stale
+        if (!(await settleRefresh())) { toast('פעולה קודמת עדיין מסתיימת. נסו להיכנס שוב בעוד רגע.', 'danger'); return; }
+        renewing = null;
+        result = await api(endpoint, { method: 'POST', body: JSON.stringify({ identifier: form.get('identifier'), password: form.get('password') }) });
+        state.token = result.token; state.expectUserId = String(result.id || '');
+      } finally { authTransition = false; }
+      await loadApp();
+    } catch (error) { toast(error.message, 'danger'); }
+  };
+};
+
+const renderForgot = () => {
+  removeMobileNav();
+  headerActions.innerHTML = '';
+  app.innerHTML = `<section class="auth-layout"><div class="auth-intro"><div class="eyebrow">ניהול אישורים למעונות יום</div><h2>כל הסניפים.<br>כל האישורים.<br><span>בלי לפספס חידוש.</span></h2><p>מקום אחד לעקוב אחרי אישורים, מועדי פקיעה ומשימות חידוש.</p><div class="auth-decoration"><span>✓</span><span>30 יום</span><span>7 ימים</span><span>יום הפקיעה</span></div></div><div class="panel auth-panel"><h3 class="auth-title">איפוס סיסמה</h3><form id="forgotForm"><label>שם או דוא״ל<input name="identifier" type="text" autocomplete="username" required></label><button class="primary full" type="submit">שליחת קישור איפוס</button><p id="forgotHint" class="muted">הקישור נשלח לכתובת הדוא״ל שמקושרת לחשבון ותקף ל־30 דקות.</p></form><button type="button" id="backToLogin" class="text-button">חזרה להתחברות</button></div></section>`;
+  document.getElementById('backToLogin').onclick = () => renderAuth();
+  document.getElementById('forgotForm').onsubmit = async (event) => {
+    event.preventDefault(); const form = new FormData(event.currentTarget);
+    try {
+      const result = await api('/api/users/password/forgot', { method: 'POST', body: JSON.stringify({ identifier: form.get('identifier') }) });
+      document.getElementById('forgotHint').textContent = `${result.message} בדקו את תיבת הדוא״ל.`;
+    } catch (error) { toast(error.message, 'danger'); }
+  };
+};
+
+const renderReset = (token) => {
+  removeMobileNav();
+  headerActions.innerHTML = '';
+  app.innerHTML = `<section class="auth-layout"><div class="auth-intro"><div class="eyebrow">ניהול אישורים למעונות יום</div><h2>כל הסניפים.<br>כל האישורים.<br><span>בלי לפספס חידוש.</span></h2><p>מקום אחד לעקוב אחרי אישורים, מועדי פקיעה ומשימות חידוש.</p><div class="auth-decoration"><span>✓</span><span>30 יום</span><span>7 ימים</span><span>יום הפקיעה</span></div></div><div class="panel auth-panel"><h3 class="auth-title">בחירת סיסמה חדשה</h3><form id="resetForm"><label>סיסמה חדשה<input name="password" type="password" autocomplete="new-password" minlength="10" required></label><label>אימות סיסמה<input name="confirm" type="password" autocomplete="new-password" minlength="10" required></label><button class="primary full" type="submit">עדכון הסיסמה</button><p class="muted">הסיסמה חייבת להכיל לפחות 10 תווים.</p></form><button type="button" id="resetToLogin" class="text-button">חזרה להתחברות</button></div></section>`;
+  document.getElementById('resetToLogin').onclick = () => { history.replaceState(null, '', location.pathname + location.search); renderAuth(); };
+  document.getElementById('resetForm').onsubmit = async (event) => {
+    event.preventDefault(); const form = new FormData(event.currentTarget);
+    if (form.get('password') !== form.get('confirm')) { toast('הסיסמאות לא תואמות', 'danger'); return; }
+    try {
+      const result = await api('/api/users/password/reset', { method: 'POST', body: JSON.stringify({ token, password: form.get('password') }) });
+      history.replaceState(null, '', location.pathname + location.search);
+      renderAuth();
+      toast(result.message, 'success');
     } catch (error) { toast(error.message, 'danger'); }
   };
 };
@@ -111,9 +228,12 @@ const loadApp = async () => {
   if (isLoading) return;
   isLoading = true;
   try {
-    const refreshed = await api('/api/auth/refresh', { method: 'POST' });
-    state.token = refreshed.token;
-    state.user = await api('/api/users/me');
+    await refreshSession();
+    const me = await api('/api/users/me');
+    // After a login the cookie jar must belong to the account that just signed in; a stale refresh from a previous account must not win.
+    if (state.expectUserId && String(me._id || me.id) !== state.expectUserId) { endSession(); state.expectUserId = null; renderAuth(); toast('הכניסה לא הושלמה. נסו להיכנס שוב.', 'danger'); return; }
+    state.expectUserId = null;
+    state.user = me;
     [state.branches, state.licenses, state.alerts, state.tasks] = await Promise.all([api('/api/branches'), api('/api/licenses'), api('/api/notifications'), api('/api/tasks')]);
     state.types = await api('/api/license-types');
     if (state.branchId && !state.branches.some((b) => b._id === state.branchId)) state.branchId = null;
@@ -139,7 +259,9 @@ const loadApp = async () => {
       localStorage.setItem(SEEN_KEY, JSON.stringify([...seen, ...plan.seen].slice(-1000)));
     }
   } catch (error) {
-    if (error.status === 401) { state.user = null; state.token = null; renderAuth(); }
+    if (error.stale) return;
+    if (error.mismatch) { accountChanged(); return; }
+    if (error.status === 401) { endSession(); renderAuth(); }
     else { if (!state.user) renderAuth(); toast(error.message, 'danger'); }
   }
   finally { isLoading = false; }
@@ -153,9 +275,9 @@ const renderHeader = () => {
   const navItem = (page, label, icon, count) => `<button data-page="${page}" class="${state.page === page ? 'selected' : ''}"${state.page === page ? ' aria-current="page"' : ''}><svg class="nav-ico" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icon}</svg><span>${label}</span>${count ? `<b class="nav-count" aria-label="${count} ממתינים">${count}</b>` : ''}</button>`;
   const isAdminUser = state.user.role === 'Admin';
   const openTasks = state.tasks.filter((task) => task.status !== 'Done').length;
-  headerActions.innerHTML = `<nav class="nav" aria-label="ניווט ראשי">${navItem('branches', 'הסניפים שלי', NAV_ICONS.branches)}${navItem('alerts', 'התראות', NAV_ICONS.alerts, currentAlerts().length)}${navItem('tasks', 'משימות', NAV_ICONS.tasks, openTasks)}${isAdminUser ? `${navItem('rent', 'שכירות', NAV_ICONS.rent)}${navItem('report', 'דוחות', NAV_ICONS.report)}${navItem('settings', 'הגדרות וצוות', NAV_ICONS.settings)}` : ''}</nav><div class="user-menu"><span class="user-avatar">${esc(state.user.name.slice(0, 1))}</span><span class="user-name">${esc(state.user.name)}<small>${isAdminUser ? 'מנהל חשבון' : 'משתמש'}</small></span><button class="icon-button" id="logout" title="התנתקות" aria-label="התנתקות"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 4H5v16h5"/><path d="M15 8l4 4-4 4M19 12H9"/></svg></button></div>`;
+  headerActions.innerHTML = `<nav class="nav" aria-label="ניווט ראשי">${navItem('branches', 'הסניפים שלי', NAV_ICONS.branches)}${navItem('alerts', 'התראות', NAV_ICONS.alerts, currentAlerts().length)}${navItem('tasks', 'משימות', NAV_ICONS.tasks, openTasks)}${state.user.aiEnabled ? navItem('ai', 'עוזר AI', NAV_ICONS.ai) : ''}${isAdminUser ? `${navItem('rent', 'שכירות', NAV_ICONS.rent)}${navItem('report', 'דוחות', NAV_ICONS.report)}${navItem('settings', 'הגדרות וצוות', NAV_ICONS.settings)}` : ''}</nav><div class="user-menu"><span class="user-avatar">${esc(state.user.name.slice(0, 1))}</span><span class="user-name">${esc(state.user.name)}<small>${isAdminUser ? 'מנהל חשבון' : 'משתמש'}</small></span><button class="icon-button" id="logout" title="התנתקות" aria-label="התנתקות"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 4H5v16h5"/><path d="M15 8l4 4-4 4M19 12H9"/></svg></button></div>`;
   headerActions.querySelectorAll('[data-page]').forEach((button) => button.onclick = () => { state.page = button.dataset.page; state.branchId = null; render(); });
-  document.getElementById('logout').onclick = async () => { try { await api('/api/auth/logout', { method: 'POST' }); } catch {} state.user = null; state.token = null; renderAuth(); };
+  document.getElementById('logout').onclick = async () => { if (authTransition) return; authTransition = true; try { if (!(await settleRefresh())) { toast('פעולה קודמת עדיין מסתיימת. נסו להתנתק שוב בעוד רגע.', 'danger'); return; } sessionGen++; renewing = null; try { await api('/api/auth/logout', { method: 'POST' }); } catch {} endSession(); renderAuth(); } finally { authTransition = false; } };
   renderMobileNav();
 };
 // Phone-width bottom navigation (shown by CSS only at <=620px; desktop keeps the top nav).
@@ -167,6 +289,7 @@ const NAV_ICONS = {
   rent: '<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h3"/>',
   report: '<path d="M7 3h8l4 4v14H7z"/><path d="M15 3v4h4M10 12h6M10 16h6"/>',
   settings: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>',
+  ai: '<path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/>',
   more: '<circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>'
 };
 const navIcon = (key) => `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${NAV_ICONS[key]}</svg>`;
@@ -181,7 +304,7 @@ const renderMobileNav = () => {
   const tab = (page, label, count) => `<button data-mpage="${page}" class="${state.page === page ? 'selected' : ''}" ${state.page === page ? 'aria-current="page"' : ''}><i>${navIcon(page)}</i><span>${label}</span>${count ? `<em aria-label="${count} ממתינים">${count}</em>` : ''}</button>`;
   const moreItems = [['rent', 'שכירות'], ['report', 'דוחות'], ['settings', 'הגדרות וצוות']];
   const moreActive = moreItems.some(([page]) => state.page === page);
-  host.innerHTML = `<nav class="mobile-tabbar" aria-label="ניווט ראשי">${tab('branches', 'סניפים')}${tab('alerts', 'התראות', alertCount)}${tab('tasks', 'משימות', taskCount)}${isAdmin ? `<button id="mobileMore" class="${moreActive ? 'selected' : ''}" aria-haspopup="true" aria-expanded="false"><i>${navIcon('more')}</i><span>עוד</span></button>` : ''}</nav>${isAdmin ? `<div class="mobile-more" id="mobileMoreSheet" hidden>${moreItems.map(([page, label]) => `<button data-mpage="${page}" class="${state.page === page ? 'selected' : ''}"><i>${navIcon(page)}</i>${label}</button>`).join('')}</div>` : ''}`;
+  host.innerHTML = `<nav class="mobile-tabbar" aria-label="ניווט ראשי">${tab('branches', 'סניפים')}${tab('alerts', 'התראות', alertCount)}${tab('tasks', 'משימות', taskCount)}${state.user.aiEnabled ? tab('ai', 'עוזר AI') : ''}${isAdmin ? `<button id="mobileMore" class="${moreActive ? 'selected' : ''}" aria-haspopup="true" aria-expanded="false"><i>${navIcon('more')}</i><span>עוד</span></button>` : ''}</nav>${isAdmin ? `<div class="mobile-more" id="mobileMoreSheet" hidden>${moreItems.map(([page, label]) => `<button data-mpage="${page}" class="${state.page === page ? 'selected' : ''}"><i>${navIcon(page)}</i>${label}</button>`).join('')}</div>` : ''}`;
   const sheet = document.getElementById('mobileMoreSheet');
   const moreButton = document.getElementById('mobileMore');
   const closeSheet = () => { if (sheet) sheet.hidden = true; moreButton?.setAttribute('aria-expanded', 'false'); };
@@ -197,7 +320,177 @@ const autoCollapse = (root, prefix) => root.querySelectorAll('.history-list, .li
   el.dataset.collapseDone = '1';
   collapseList(el, { itemSelector: ':scope > *', limit: LIST_LIMITS.row, key: `${prefix}-${n}` });
 });
-const render = () => { resetScrollOnViewChange(); renderHeader(); if (state.page === 'alerts') return renderAlerts(); if (state.page === 'tasks') return renderTasks(); if (state.page === 'rent') return renderRent(); if (state.page === 'settings') return renderSettings(); if (state.page === 'report') return renderReport(); if (state.branchId) return renderBranch(); return renderBranches(); };
+
+// AI assistant page. Proposal-only: the server returns text, nothing is saved.
+// Visible only to users with aiEnabled; the server enforces the same rule.
+// The assistant does not see system data or read documents yet; the page says so.
+const aiChat = [];
+let aiMode = 'chat'; let aiPreferAgreement = '';
+const TASK_STATUS_HE = { To_Do: 'לביצוע', In_Progress: 'בטיפול', Done: 'הושלם' };
+const RENT_LABEL = { rent_edit_payment: 'עריכת תשלום ממתין', rent_mark_handed: 'סימון צ׳ק כנמסר', rent_mark_cleared: 'סימון תשלום כנפרע', rent_revert_payment: 'ביטול סימון תשלום' };
+const BRANCH_FIELD = { name: 'שם', address: 'כתובת', managerName: 'מנהל/ת', phone: 'טלפון', maxChildren: 'מספר ילדים מרבי', status: 'סטטוס', emails: 'מיילים', authorityId: 'גוף משלם', kind: 'סוג הסניף' };
+const iso = (x) => `\u2068${x}\u2069`;
+const cmpLines = (label, cur, next) => [`${label} נוכחי: ${iso(cur)}`, `${label} מוצע: ${iso(next)}`];
+const bval = (k, v) => (v === '' || v == null || (Array.isArray(v) && !v.length) ? 'ריק' : k === 'kind' ? ({ daycare: 'מעון', property: 'נכס / משרד' }[v] || v) : k === 'status' ? (BRANCH_STATUS[v] || v) : Array.isArray(v) ? v.join(', ') : v);
+const BRANCH_STATUS = { Active: 'פעיל', Pending_License: 'ממתין לרישיון', Suspended: 'מושעה' };
+const AGR_FIELD = { monthlyAmount: 'סכום חודשי (גם בתדירות רבעונית או שנתית)', quarterlyAmount: 'סכום תשלום רבעוני', chequeSeries: 'סדרת צ׳קים מופקדת', annualAmount: 'סכום תשלום שנתי', frequency: 'תדירות', paymentMethod: 'אמצעי תשלום', firstDueDate: 'תאריך פרעון ראשון', direction: 'כיוון' };
+const AGR_VAL = { monthly: 'חודשי', quarterly: 'רבעוני', annual: 'שנתי', custom: 'מותאם', cheque: 'צ׳ק', transfer: 'העברה', incoming: 'הרשות משלמת לכם', outgoing: 'אתם משלמים לגוף התשלום' };
+const csTxt = (v) => (v && typeof v === 'object' ? `הופקדו ${v.depositedCount} צ׳קים · התחלה: ${v.seriesStartDate || 'לא הוגדר'} · סיום: ${v.seriesEndDate}` : v);
+const AR = (v) => (v && typeof v === 'object' ? csTxt(v) : v === null || v === undefined || v === '' ? 'לא הוגדר' : (AGR_VAL[v] || v));
+const CSV_HEAD = { branch: 'סניף', type: 'סוג אישור', issued: 'הנפקה', expiryDate: 'תוקף', file: 'קובץ', authority: 'גוף תשלום', dueDate: 'מועד', amount: 'סכום', summary: 'סיכום', when: 'מתי', user: 'משתמש', action: 'פעולה', target: 'יעד', outcome: 'תוצאה' };
+// Exports exactly the rows the report returned (nothing more is fetched). Cells that start like a formula are neutralized.
+const csvCell = (v) => { let t = v === null || v === undefined ? '' : String(v); if (/^[=+\-@\t\r]/.test(t)) t = `'${t}`; return `"${t.replace(/"/g, '""')}"`; };
+const exportRowsCsv = (csv) => {
+  if (!csv || !csv.rows.length) return;
+  const keys = [...new Set(csv.rows.flatMap((r) => Object.keys(r)))].filter((k) => k !== 'fileLicenseId');
+  const lines = [keys.map((k) => csvCell(CSV_HEAD[k] || k)).join(','), ...csv.rows.map((r) => keys.map((k) => csvCell(r[k])).join(','))];
+  const blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'kinderguard-report.csv'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+const deleteBranchCounts = (b) => b ? `אישורים (כולל היסטוריה): ${b.licenses} · קבצים מצורפים: ${b.files} · התראות: ${b.alerts}` : '';
+const describeAction = (a, branches) => { if (a.domain === 'license' && a.type === 'create_license') return { head: 'יצירת אישור חדש (בלי קובץ מצורף)', lines: [`סניף: ${a.branchName}`, `סוג אישור: ${a.typeName}`, `הנפקה: ${a.issueDate}`, `תפוגה: ${a.expiryDate}`, 'לא קיים אישור פעיל כזה. העוזר לא מחליף ולא מחדש אישורים.'] }; if (a.domain === 'branch' && a.type === 'delete_branch') return { head: `מחיקת סניף${a.currentName ? `: ${a.currentName}` : ' (יש לבחור איזה)'}`, lines: [a.before ? `יימחקו יחד איתו. ${deleteBranchCounts(a.before)}` : '', a.before ? `היסטוריה כספית נשמרת (הסכמי שכירות סגורים: ${a.before.closedAgreements}). התשלומים שלהם לא יימחקו.` : '', 'המחיקה אינה הפיכה. סניף עם הסכם שכירות פעיל לא יימחק.', 'אם נוצר הסכם חדש בזמן המחיקה, הוא עלול להיסגר ותשלומיו העתידיים יבוטלו. לפני המחיקה המערכת בודקת שוב את האישורים, הקבצים וההתראות. אם הם שונים ממה שמוצג כאן, המחיקה נעצרת. אישור או קובץ שנוסף בדיוק בזמן המחיקה עלול להימחק גם הוא או להיות מנוקה אחר כך ברקע.', 'נדרשת הסיסמה הנוכחית.', a.warning || ''].filter(Boolean) }; if (a.domain === 'payment_group') { const money = (n) => `${Number(n).toLocaleString('he-IL')} ₪`; const allocs = (a.allocations || []).map((x) => `${x.branchName}: ${money(x.amount)}`); const HEAD = { create_payment_group: 'תשלום מרוכז חדש', group_mark_handed: 'סימון תשלום מרוכז כנמסר', group_mark_cleared: 'סימון תשלום מרוכז כנפרע', cancel_payment_group: 'ביטול רישום תשלום מרוכז', revert_payment_group: 'ביטול סימון של תשלום מרוכז' }; return { head: `${HEAD[a.type]}: ${a.authorityName}`, lines: [`אמצעי: ${a.methodLabel} · סך הכל ${money(a.total)} · מועד ${a.dueDate}`, ...(a.currentStatus ? [`מצב נוכחי: ${a.currentStatus}`] : []), ...allocs, a.reason ? `סיבה: ${a.reason}` : '', 'זה עדכון רישום במערכת בלבד. לא מתבצע תשלום.', a.sensitive ? 'נדרשת הסיסמה הנוכחית.' : ''].filter(Boolean) }; } if (a.domain === 'notification') return { head: `התראה: ${a.subject}`, lines: [a.branchName ? `סניף: ${a.branchName}` : '', ...cmpLines('מצב טיפול', a.fromLabel, a.toLabel), 'אפשר לשנות בחזרה.'].filter(Boolean) }; if (a.domain === 'license') { const tgt = a.needsChoice ? '' : `${a.typeName ? a.typeName : ''}${a.branchName ? ` · ${a.branchName}` : ''}${a.expiry ? ` · בתוקף עד ${a.expiry}` : ''}`; if (a.type === 'create_license_type') return { head: `סוג אישור חדש: ${a.name}`, lines: [a.branchName ? `לסניף: ${a.branchName}` : 'לכל הסניפים', a.description || '', a.warning || ''].filter(Boolean) }; if (a.type === 'deactivate_license_type') return { head: `הסרת סוג אישור: ${a.name}`, lines: [a.branchName ? `סניף: ${a.branchName}` : 'לכל הסניפים', 'נדרשת הסיסמה הנוכחית.', a.warning || ''].filter(Boolean) }; return { head: a.type === 'archive_license' ? `העברת אישור לארכיון${a.needsChoice ? ' (יש לבחור איזה)' : ''}` : `מחיקת הקובץ המצורף לאישור${a.needsChoice ? ' (יש לבחור איזה)' : ''}`, lines: [tgt, a.type === 'delete_license_file' && a.fileName ? `קובץ: ${a.fileName}. המחיקה אינה הפיכה. האישור והתאריכים נשארים.` : (a.type === 'archive_license' ? 'האישור יעבור לארכיון והתראות פתוחות עליו ייסגרו.' : ''), 'נדרשת הסיסמה הנוכחית.', a.warning || ''].filter(Boolean) }; } if (a.domain === 'authority') return a.type === 'create_authority' ? { head: `גוף תשלום חדש: ${a.name}`, lines: [`סוג: ${a.kind === 'private' ? 'בעל נכס פרטי' : 'רשות או חברה עירונית'}`, a.warning || ''].filter(Boolean) } : { head: a.needsChoice ? 'מחיקת גוף תשלום (יש לבחור איזה)' : `מחיקת גוף תשלום: ${a.name}`, lines: [a.needsChoice ? '' : `סוג: ${a.kind === 'private' ? 'בעל נכס פרטי' : 'רשות או חברה עירונית'}`, 'הגוף יימחק. הסכמים סגורים והיסטוריית התשלומים נשארים.', 'נדרשת הסיסמה הנוכחית.', a.warning || ''].filter(Boolean) }; if (a.type === 'delete_agreement_document') return { head: `מחיקת מסמך: \u2066${a.fileName || 'ללא שם'}\u2069`, lines: [`מההסכם: ${a.branchName} · ${a.authorityName}`, 'המסמך יוסר מההסכם ולא ניתן לשחזר אותו.', 'נדרשת הסיסמה הנוכחית.'] }; if (a.type === 'create_agreement_step') return { head: 'הסכם שכירות חדש, שלב 1 מתוך 2: בחירת סניף', lines: [`סכום חודשי: ${iso(a.changes.monthlyAmount)} ₪`, a.warning || ''].filter(Boolean) }; if (a.domain === 'agreement' && a.type === 'create_agreement') return { head: `הסכם שכירות חדש: ${a.branchName || 'יש לבחור סניף'} · ${a.authorityName || 'יש לבחור גוף תשלום'}`, lines: [`סכום חודשי: ${iso(a.changes.monthlyAmount)} ₪`, `תדירות: ${AR(a.changes.frequency)}`, `אמצעי תשלום: ${AR(a.changes.paymentMethod)}`, `תאריך פרעון ראשון: ${iso(date(a.changes.firstDueDate))}`, `כיוון: ${a.changes.direction === 'incoming' ? 'הרשות משלמת לכם שכירות על המעון' : 'אתם משלמים שכירות לגוף התשלום'}`, ...(a.changes.customDueDates ? [`מועדי פרעון מותאמים (${a.changes.customDueDates.length}): ${a.changes.customDueDates.join(' · ')}`] : []), ...(a.changes.quarterlyAmount !== undefined ? [`סכום תשלום רבעוני: ${iso(a.changes.quarterlyAmount)} ₪`] : []), ...(a.changes.annualAmount !== undefined ? [`סכום תשלום שנתי: ${iso(a.changes.annualAmount)} ₪`] : []), ...(a.changes.chequeSeries ? [`סדרת צ׳קים מופקדת: ${csTxt(a.changes.chequeSeries)}`] : []), 'ייווצרו תשלומים מתוזמנים לפי ההסכם. רישום במערכת בלבד, לא ביצוע תשלום.', 'נדרשת הסיסמה הנוכחית.', a.warning || ''].filter(Boolean) }; if (a.domain === 'agreement') return { head: `${a.type === 'close_agreement' ? 'סגירת הסכם שכירות' : 'עדכון הסכם שכירות'}: ${a.branchName} · ${a.authorityName}`, lines: [...(a.type === 'close_agreement' ? ['ההסכם יסומן כסגור והתשלומים העתידיים שממתינים יבוטלו.', a.reason ? `סיבה: ${a.reason}` : ''] : [...Object.entries(a.changes).flatMap(([k, v]) => cmpLines(AGR_FIELD[k], AR(a.current[k]), AR(v))), ...(a.effect ? ((FQ) => [`סכום כל תשלום מתוזמן לפני (${FQ[a.effect.beforeFrequency] || a.effect.beforeFrequency}): ${AR(a.effect.before)}`, `סכום כל תשלום מתוזמן אחרי (${FQ[a.effect.afterFrequency] || a.effect.afterFrequency}): ${AR(a.effect.after)}`, ...(a.effect.before === a.effect.after && a.changes.monthlyAmount !== undefined ? ['הסכום החודשי משתנה אבל סכום התשלום המתוזמן לא, כי נקבע לפי הסכום הרבעוני/השנתי השמור בהסכם.'] : []),
+ ...(((a.changes.quarterlyAmount !== undefined && a.effect.afterFrequency !== 'quarterly') || (a.changes.annualAmount !== undefined && a.effect.afterFrequency !== 'annual')) ? ['הסכום הרבעוני/השנתי נשמר בהסכם אבל לא משפיע על התשלומים המתוזמנים כל עוד התדירות לא רבעונית/שנתית בהתאמה.'] : [])])({ monthly: 'חודשי', quarterly: 'רבעוני', annual: 'שנתי', custom: 'מותאם' }) : []),
+ ...(a.changes.chequeSeries ? ((o, n) => ['שימו לב: השינוי מחליף את כל סדרת הצ׳קים השמורה בהסכם, לא רק שדה אחד.', ...(o && o.seriesStartDate && !n.seriesStartDate ? [`תאריך ההתחלה הקודם (${o.seriesStartDate}) יימחק, כי לא צוין תאריך התחלה חדש.`] : []), ...(o && o.depositedCount !== n.depositedCount ? [`מספר הצ׳קים שהופקדו ישתנה מ-${o.depositedCount} ל-${n.depositedCount}.`] : [])])(a.current.chequeSeries, a.changes.chequeSeries) : []), ...(a.changes.direction !== undefined ? ['אזהרה: החלפת הכיוון משנה את הפירוש של כל התשלומים שכבר נרשמו בהסכם הזה, גם של העבר, לא רק של תשלומים חדשים. בדקו שזה הכיוון הנכון לפני האישור.'] : []), ...(a.changes.monthlyAmount !== undefined || a.changes.frequency !== undefined || a.changes.paymentMethod !== undefined || a.changes.firstDueDate !== undefined ? ['שינוי תדירות או סכום יעדכן את לוח התשלומים הממתינים.'] : []), 'רישום במערכת בלבד, לא ביצוע תשלום.']), 'נדרשת הסיסמה הנוכחית.'].filter(Boolean) }; if (a.domain === 'team') return { head: `הוספת משתמש: ${a.name}`, lines: [`דוא״ל: ${a.email}`, a.branchNames?.length ? `סניפים: ${a.branchNames.join(', ')}` : 'ללא סניפים שנבחרו (רלוונטי למנהל סניף)'] }; if (a.domain === 'branch') { const bv = (k, v) => (k === 'authorityId' ? (v === '__payer_choice__' ? 'יש לבחור למטה' : v ? (a.authorityNames?.[String(v)] || 'גוף משלם לא מוכר') : 'ללא') : bval(k, v)); return { head: a.type === 'create_branch' ? `פתיחת סניף: ${a.fields.name}` : (a.needsChoice ? 'עדכון סניף (יש לבחור איזה)' : `עדכון סניף: ${a.currentName}`), lines: [...Object.entries(a.fields).flatMap(([k, v]) => (a.before && a.type === 'update_branch' ? cmpLines(BRANCH_FIELD[k] || k, bv(k, a.before[k]), bv(k, v)) : [`${BRANCH_FIELD[k] || k}: ${bv(k, v)}`])), a.warning || ''].filter(Boolean) }; } if (a.domain === 'rent') return { head: `${RENT_LABEL[a.type]}: ${a.branchName} · ${a.authorityName}`, lines: [...(a.changes ? [`סכום נוכחי: \u2068${a.before.amount} ₪\u2069`, a.changes.amount !== undefined ? `סכום מוצע: \u2068${a.changes.amount} ₪\u2069` : 'סכום מוצע: ללא שינוי', `יעד פרעון נוכחי: \u2068${date(a.before.dueDate)}\u2069`, a.changes.dueDate ? `יעד פרעון מוצע: \u2068${date(a.changes.dueDate)}\u2069` : 'יעד פרעון מוצע: ללא שינוי'] : [`סכום: ${a.amount} ₪ · יעד: ${a.dueDate}`]), `סטטוס נוכחי: ${({ Pending: 'ממתין', Handed: 'נמסר', Cleared: 'נפרע' })[a.currentStatus] || a.currentStatus}`, a.reason ? `סיבה: ${a.reason}` : '', 'רישום במערכת בלבד, לא ביצוע תשלום בפועל.', a.sensitive ? 'נדרשת הסיסמה הנוכחית.' : ''].filter(Boolean) }; const bn = (id) => (branches.find((b) => b.id === id) || {}).name; if (a.type === 'create_task') return { head: 'משימה חדשה', lines: [`כותרת: ${a.title}`, a.notes ? `הערות: ${a.notes}` : '', a.dueDate ? `יעד: ${a.dueDate}` : '', a.branchId ? `סניף: ${bn(a.branchId) || ''}` : ''].filter(Boolean) }; if (a.type === 'delete_task') return { head: `מחיקת משימה: ${a.currentTitle}`, lines: ['המשימה תימחק לצמיתות. נדרשת הסיסמה הנוכחית.'] }; if (a.type === 'close_task') return { head: `סגירת משימה: ${a.currentTitle}`, lines: cmpLines('סטטוס', TASK_STATUS_HE[a.currentStatus] || a.currentStatus, TASK_STATUS_HE.Done) }; return { head: `עדכון משימה: ${a.currentTitle}`, lines: [a.title ? `כותרת חדשה: ${a.title}` : '', a.notes !== undefined ? `הערות חדשות: ${a.notes || '(ריק)'}` : '', a.dueDate ? `יעד חדש: ${a.dueDate}` : ''].filter(Boolean) }; };
+// Confirming sends only the proposal id: the server holds the proposal, applies it with the caller's own permissions, and ignores duplicates.
+const runAction = async (a, password, choice, extra) => { let headers; if (a.sensitive) { const g = await api('/api/auth/step-up', { method: 'POST', body: JSON.stringify({ password, action: `ai:${a.type}`, scope: a.proposalId }) }); headers = { 'X-Step-Up': g.stepUpToken }; } return api(`/api/ai/proposals/${a.proposalId}/confirm`, { method: 'POST', body: JSON.stringify({ ...(choice ? { branchId: choice } : {}), ...(extra || {}) }), headers }); };
+const AI_IDEAS = ['נסחו לי הודעה קצרה למנהלת סניף על אישור שפג תוקפו', 'הסבירו לי במילים פשוטות איך מחדשים רישיון עסק', 'עזרו לי לנסח תזכורת לתשלום שכירות'];
+const AI_SPARK = '<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/></svg>';
+let aiDoc = null; let aiDocList = null; let aiBranchPending = null; let aiModelPending = null; let aiPre = null;
+// Optional Claude pre-check of an Excel/Word table before any card is prepared. Advisory only: the answers only choose rows to leave out
+// (sent as skipRows); the server parser, matching, per-card confirm and step-up still decide everything. Nothing leaves the system without the ticked consent.
+const coverageHtml = (c) => (c && c.note ? `<div class="ai-action" id="aiCoverage"><strong>כיסוי המסמך</strong><div>הוצגו ${esc(c.read)} ${c.read === 1 ? 'שורה' : 'שורות'} מהמסמך (המגבלה ${esc(c.cap)}).</div><div>${c.truncated ? 'הקריאה החזירה יותר מ-20 שורות. רק 20 הראשונות עובדו והוצגו, והשאר לא יובאו.' : 'לא ניתן לדעת אם המסמך כולל שורות נוספות שלא עובדו.'}</div><div class="muted">${esc(c.note)}</div></div>` : '');
+const fileReviewHtml = (fr) => { if (!fr || (!(fr.merged || []).length && !(fr.omitted || []).length && !(fr.links || []).length)) return ''; const src = { filled: 'הושלם משורה', chosen: 'נבחר על ידכם משורה' };
+  return `<div class="ai-review" id="aiFileReview"><strong>שינויים בקובץ לפי בחירתכם בבדיקה המקדימה</strong>${(fr.merged || []).map((m) => `<div>שורות ${m.keep} ו-${m.drop} אוחדו לשורה אחת (כפילות)${m.cols.length ? `: ${m.cols.map((c) => `${esc(c.header)}: ${esc(c.value)} (${src[c.source]} ${c.row})`).join('; ')}` : ' (בלי שינוי בערכים)'}</div>`).join('')}${(fr.omitted || []).length ? `<div>שורות שהושמטו: ${fr.omitted.join(', ')}</div>` : ''}${(fr.links || []).map((l) => `<div>שורות ${l.rows[0]} ו-${l.rows[1]}: ${l.relation === 'same_place' ? 'רשומות נפרדות לאותו סניף או מקום, נשארו כשורות נפרדות' : 'שונים, נשארו כשורות נפרדות'}</div>`).join('')}<small class="muted">שורה 1 היא הכותרת. כל הצעה למטה נבדקת ודורשת אישור.</small></div>`; };
+const aiPreOwner = () => String(state.user?._id || state.user?.id || '');
+const aiPreHash = async (file) => { try { const h = await crypto.subtle.digest('SHA-256', await file.arrayBuffer()); return [...new Uint8Array(h)].map((x) => x.toString(16).padStart(2, '0')).join(''); } catch { return ''; } };
+// The card is bound to the tab, the signed-in account and the exact file bytes (sha256). Switching tab, account or file drops it.
+const aiPreStart = async (file, endpoint, mode) => { aiPre = { file, endpoint, mode, owner: aiPreOwner(), stage: 'choose', sha: await aiPreHash(file) }; renderAi(); };
+const AI_PRE_DUP = { branches: 'אותו מעון בדיוק נכתב פעמיים', team: 'אותו משתמש בדיוק נכתב פעמיים', tasks: 'אותה משימה בדיוק נכתבה פעמיים', licenses: 'אותו אישור בדיוק נכתב פעמיים' };
+const AI_PRE_SAME = { branches: 'אותו מעון בשתי שורות עם נתונים שונים או משלימים: להשאיר את שתי השורות כפי שהן', team: 'אותו סניף, משתמשים שונים: להשאיר את שתי השורות', tasks: 'אותו סניף, משימות נפרדות: להשאיר את שתי השורות', licenses: 'אותו סניף, אישורים נפרדים: להשאיר את שתי השורות' };
+const aiPreCard = (parent, endpoint) => {
+  if (!aiPre) return; const d = aiPre; const box = document.createElement('div'); box.className = 'ai-action'; box.id = 'aiPreCard';
+  const nm = `<bdi dir="ltr">${esc(d.file.name)}</bdi>`;
+  const goLocal = async (edits) => { aiPre = null; aiChat.push({ role: 'user', text: `קובץ: ${d.file.name}` }); try { const fd = new FormData(); fd.append('file', d.file); if (edits) { if (edits.skip.length) fd.append('skipRows', JSON.stringify(edits.skip)); if (edits.merges.length) fd.append('rowMerges', JSON.stringify(edits.merges)); if (edits.links.length) fd.append('rowLinks', JSON.stringify(edits.links)); fd.append('preflightSha', d.result.fileSha256); } const r = await api(endpoint, { method: 'POST', body: fd }); aiChat.push({ role: 'assistant', text: r.summary || '', proposal: r, done: {} }); } catch (error) { aiChat.push({ role: 'error', text: error.message }); } renderAi(); };
+  if (d.stage === 'choose' || d.stage === 'busy') {
+    box.innerHTML = `<strong>בדיקה מקדימה של הקובץ עם Claude</strong><div>${nm}</div><div>הקובץ עובר קודם בדיקה של Claude: סיכום, סימון נתונים חשודים ושאלה כששורות דומות. הבדיקה היא המלצה בלבד, ולא מכינה ולא משנה כלום. שום שורה לא מושמטת או מאוחדת בלי בחירה שלכם.</div><label class="check-row"><input type="checkbox" id="aiPreConsent"${d.stage === 'busy' ? ' checked disabled' : ''}><span>אני מאשר/ת לשלוח ל-<bdi dir="ltr">Claude</bdi> (<bdi dir="ltr">Anthropic</bdi>) עותק מצומצם של תוכן הקובץ: עד 200 שורות ו-15 עמודות, בלי עמודות סיסמה, בלי תאים שמתחילים בתו חשוד, ועם כתובות אימייל מוחלפות בסימון. הקובץ לא נשמר.</span></label>${d.err ? `<div class="form-error">${esc(d.err)}</div>` : ''}<button type="button" class="primary small-btn" id="aiPreClaude" disabled>${d.stage === 'busy' ? 'בודק...' : 'בדיקה עם Claude'}</button> <button type="button" class="secondary small-btn" id="aiPreLocal"${d.stage === 'busy' ? ' disabled' : ''}>המשך בלי בדיקת Claude (קריאה מקומית בלבד)</button> <button type="button" class="secondary small-btn" id="aiPreCancel"${d.stage === 'busy' ? ' disabled' : ''}>ביטול</button>`;
+    parent.appendChild(box); const c = box.querySelector('#aiPreConsent'); const b = box.querySelector('#aiPreClaude');
+    if (d.stage === 'choose') { c.onchange = () => { b.disabled = !c.checked; };
+      b.onclick = async () => { if (!c.checked) return; d.stage = 'busy'; d.err = ''; renderAi(); try { const fd = new FormData(); fd.append('file', d.file); fd.append('consentExternal', 'true'); fd.append('mode', d.mode); const res = await api('/api/ai/files/preflight', { method: 'POST', body: fd }); if (d.sha && res.fileSha256 !== d.sha) throw new Error('הקובץ שנבדק שונה מהקובץ שנבחר. בחרו את הקובץ מחדש.'); d.result = res; d.stage = 'result'; } catch (error) { d.stage = 'choose'; d.err = `${error.message} אפשר לנסות שוב, או להמשיך בקריאה מקומית בלי Claude בבחירה מפורשת.`; } renderAi(); };
+      box.querySelector('#aiPreLocal').onclick = () => goLocal(); box.querySelector('#aiPreCancel').onclick = () => { aiPre = null; renderAi(); }; }
+    return;
+  }
+  const r = d.result; const qs = r.questions || []; const fl = r.flags || [];
+  const cmp = (q, i) => `<table class="ai-cmp"><thead><tr><th>עמודה</th><th>שורה ${q.rows[0]}</th><th>שורה ${q.rows[1]}</th></tr></thead><tbody>${q.compare.cols.map((c) => `<tr${c.conflict ? ' class="ai-cmp-diff"' : ''}><td>${esc(c.header)}</td><td>${esc(c.a) || '<em>ריק</em>'}</td><td>${esc(c.b) || '<em>ריק</em>'}</td></tr>`).join('')}</tbody></table>`;
+  const pickHtml = (q, i) => { const cf = q.compare.cols.filter((c) => c.conflict); return `<div class="ai-pick" data-prepicks="${i}" hidden>${cf.length ? `<small>בשורות יש ערכים שונים. בחרו ערך אחד לכל עמודה:</small>${cf.map((c) => `<div class="ai-pick-col"><strong>${esc(c.header)}</strong><label class="check-row"><input type="radio" name="prepick${i}_${c.col}" value="keep"><span>${esc(c.a)} (שורה ${q.rows[0]})</span></label><label class="check-row"><input type="radio" name="prepick${i}_${c.col}" value="drop"><span>${esc(c.b)} (שורה ${q.rows[1]})</span></label></div>`).join('')}` : '<small>אין ערכים סותרים. ערכים חסרים באחת השורות יושלמו מהשורה השנייה, ותראו את התוצאה אחרי ההכנה.</small>'}</div>`; };
+  box.innerHTML = `<strong>תוצאת הבדיקה המקדימה</strong><div>${nm}</div><p>${esc(r.summary || '')}</p><small class="muted">${esc(r.note || '')} נבדקו ${r.rowsSent} מתוך ${r.totalRows} שורות (שורה 1 היא הכותרת). ${(r.minimisation || []).map(esc).join('. ')}</small>${fl.length ? `<fieldset class="ai-choice"><legend>נתונים שסומנו</legend>${fl.map((f) => `<label class="check-row"><input type="checkbox" data-preskip="${f.row}"><span>שורה ${f.row}: ${esc(f.issue)} (סמנו כדי להשמיט את השורה)</span></label>`).join('')}</fieldset>` : ''}${qs.map((q, i) => `<fieldset class="ai-choice" data-preq="${i}"><legend>${esc(q.question)}</legend>${cmp(q, i)}<small class="muted">בחרו כפילות רק אם שתי השורות הן אותה רשומה בדיוק. שורות של אותו סניף הן לרוב רשומות נפרדות.</small><label class="check-row"><input type="radio" name="preq${i}" value="sameplace"><span>${AI_PRE_SAME[d.mode] || 'רשומות נפרדות: להשאיר את שתי השורות'}</span></label><label class="check-row"><input type="radio" name="preq${i}" value="diff"><span>שונים: להשאיר את שתי השורות</span></label><label class="check-row"><input type="radio" name="preq${i}" value="dup"><span>כפילות: ${AI_PRE_DUP[d.mode] || 'אותה רשומה בדיוק נכתבה פעמיים'}. לאחד את שורה ${q.rows[0]} ושורה ${q.rows[1]} לשורה אחת (שום נתון לא נמחק בלי בחירה שלכם)</span></label>${pickHtml(q, i)}<label class="check-row"><input type="radio" name="preq${i}" value="omit"><span>לא בטוח: להשמיט את שתי השורות, בלי הצעה עבורן</span></label></fieldset>`).join('')}<button type="button" class="primary small-btn" id="aiPreContinue">המשך להכנת הצעות</button> <button type="button" class="secondary small-btn" id="aiPreCancel">ביטול</button><small class="muted">גם אחרי הבדיקה, כל שורה עוברת בדיקות והרשאות בתוכנה וכל כרטיס דורש אישור.</small>`;
+  parent.appendChild(box);
+  qs.forEach((q, i) => box.querySelectorAll(`input[name="preq${i}"]`).forEach((x) => { x.onchange = () => { box.querySelector(`[data-prepicks="${i}"]`).hidden = x.value !== 'dup' || !x.checked; }; }));
+  const err = (m) => { box.querySelector('.form-error')?.remove(); box.querySelector('#aiPreContinue').insertAdjacentHTML('beforebegin', `<div class="form-error">${esc(m)}</div>`); };
+  box.querySelector('#aiPreContinue').onclick = () => {
+    const skip = new Set(); const merges = []; const links = []; box.querySelectorAll('[data-preskip]:checked').forEach((x) => skip.add(Number(x.dataset.preskip)));
+    for (let i = 0; i < qs.length; i += 1) { const q = qs[i]; const v = box.querySelector(`input[name="preq${i}"]:checked`); if (!v) return err('ענו על כל השאלות לפני ההמשך.');
+      if (v.value === 'omit') { skip.add(q.rows[0]); skip.add(q.rows[1]); } else if (v.value === 'dup') { const pick = {}; for (const c of q.compare.cols.filter((x) => x.conflict)) { const pv = box.querySelector(`input[name="prepick${i}_${c.col}"]:checked`); if (!pv) return err(`בחרו ערך אחד בעמודה "${c.header}" לפני ההמשך.`); pick[c.col] = pv.value; } merges.push({ keep: q.rows[0], drop: q.rows[1], pick }); } else links.push({ rows: [q.rows[0], q.rows[1]], relation: v.value === 'sameplace' ? 'same_place' : 'different' }); }
+    for (const m of merges) if (skip.has(m.keep) || skip.has(m.drop)) return err('אותה שורה נבחרה לכמה פעולות. בדקו את הבחירות.');
+    goLocal({ skip: [...skip].sort((a, b) => a - b), merges, links });
+  };
+  box.querySelector('#aiPreCancel').onclick = () => { aiPre = null; renderAi(); };
+};
+const renderAi = (pending = false) => {
+  if (aiModelPending && (aiModelPending.mode !== aiMode || aiModelPending.owner !== aiPreOwner() || !state.user)) aiModelPending = null;
+  if (aiPre && (aiPre.mode !== aiMode || aiPre.owner !== aiPreOwner() || !state.user)) aiPre = null;
+  const first = String(state.user.name || '').split(' ')[0];
+  const empty = `<div class="ai-empty"><span class="ai-spark">${AI_SPARK}</span><h2>שלום ${esc(first)}, במה לעזור?</h2><p>כתבו בחופשיות, בעברית. אפשר גם להתחיל מאחד הרעיונות:</p><div class="ai-ideas">${AI_IDEAS.map((t) => `<button type="button" class="ai-idea" data-idea="${esc(t)}">${esc(t)}</button>`).join('')}</div></div>`;
+  const proposalHtml = (m) => `${m.text ? `<p>${esc(m.text)}</p>` : ''}${coverageHtml(m.proposal.coverage)}${fileReviewHtml(m.proposal.fileReview)}${m.proposal.actions.map((a, i) => { const d = describeAction(a, m.proposal.branches); const st = m.done?.[i]; if (st?.ok && st.payerFail) { d.head = 'הסניף נוצר'; d.lines = [`שם: ${a.fields?.name || ''}`, `גוף משלם: ${st.payerNow || 'לא נקשר'}`]; } return `<div class="ai-action ${st?.ok ? 'done' : ''}"><strong>${esc(d.head)}</strong>${d.lines.map((l) => `<div>${esc(l)}</div>`).join('')}${a.needsChoice && !st?.ok ? `<fieldset class="ai-choice"><legend>${a.domain === 'license' ? 'בחרו אישור' : a.domain === 'authority' ? 'בחרו גוף תשלום' : a.choiceField === 'agreementPayer' ? 'בחרו גוף תשלום' : a.choiceField === 'branchPayer' ? 'בחרו גוף משלם' : 'בחרו סניף'}</legend>${a.candidates.map((c) => `<label class="check-row ai-cand"><input type="radio" name="bc-${aiChat.indexOf(m)}-${i}" value="${esc(c.id)}"> <span>${esc(c.name)}${c.detail ? `<small class="ai-diff">${esc(c.detail)}</small>` : ''}${a.type === 'delete_branch' && c.before ? `<small class="ai-diff">${esc(deleteBranchCounts(c.before))}</small>` : ''}${c.before && a.fields ? Object.entries(a.fields).map(([k, v]) => `<small class="ai-diff">${esc(BRANCH_FIELD[k] || k)} נוכחי: ${esc(iso(bval(k, c.before[k])))}</small><small class="ai-diff">${esc(BRANCH_FIELD[k] || k)} מוצע: ${esc(iso(bval(k, v)))}</small>`).join('') : ''}</span></label>`).join('')}</fieldset>` : ''}${a.needsNewUser && !st?.ok ? `<div class="ai-newuser"><label class="ai-pw">תפקיד<select data-nurole="${aiChat.indexOf(m)}:${i}"><option value="Manager" ${a.suggestedRole === 'Manager' ? 'selected' : ''}>מנהל סניף</option><option value="Admin" ${a.suggestedRole === 'Admin' ? 'selected' : ''}>מנהל חשבון</option></select></label><label class="ai-pw">סיסמה ראשונית למשתמש החדש<input type="password" autocomplete="new-password" data-nupass="${aiChat.indexOf(m)}:${i}"></label><label class="check-row"><input type="checkbox" data-nuai="${aiChat.indexOf(m)}:${i}"> לאפשר למשתמש להשתמש בעוזר ה-AI</label></div>` : ''}${a.sensitive && !st?.ok && !st?.dismissed ? `<label class="ai-pw">הסיסמה הנוכחית שלכם<input type="password" autocomplete="current-password" data-pass="${aiChat.indexOf(m)}:${i}"></label>` : ''}${st?.ok ? (st.stepDone ? '<span class="ai-state ok">הסניף נבחר. בחירת גוף התשלום בכרטיס הבא. לא נשמר דבר</span>' : st.payerFail ? (st.payerNow ? `<span class="ai-state err">הסניף נוצר, אבל הקישור לגוף המשלם שנבחר נכשל (הוא השתנה או נמחק מאז ההצעה). כרגע מקושר גוף משלם אחר: ${esc(st.payerNow)}. אל תיצרו את הסניף שוב. בדקו שזה הגוף הנכון.</span>` : '<span class="ai-state err">הסניף נוצר, אבל גוף המשלם לא נקשר אליו (הוא השתנה או נמחק מאז ההצעה). אל תיצרו את הסניף שוב. פתחו את הסניף וקשרו גוף משלם ידנית.</span>') : st.cleanup ? '<span class="ai-state ok">הסניף נמחק. ניקוי של אישורים או קבצים שנוצרו בזמן המחיקה ממתין ויושלם אוטומטית ברקע</span>' : st.pending ? '<span class="ai-state ok">הקישור לקובץ הוסר. מחיקת הקובץ מהאחסון עדיין ממתינה ולא הושלמה</span>' : '<span class="ai-state ok">בוצע</span>') : st?.dismissed ? '<span class="ai-state">בוטל, לא נשמר דבר</span>' : `${st?.error ? `<span class="ai-state err">${esc(st.error)}</span>` : ''}${a.type === 'create_agreement_step' ? `<button type="button" class="primary small-btn" data-aistep="${aiChat.indexOf(m)}:${i}">המשך לבחירת גוף התשלום (לא נשמר דבר)</button>` : `<button type="button" class="primary small-btn" data-confirm="${aiChat.indexOf(m)}:${i}">אישור ושמירה</button>`} <button type="button" class="secondary small-btn" data-dismiss="${aiChat.indexOf(m)}:${i}">ביטול</button>`}</div>`; }).join('')}${m.proposal.unclear ? `<p class="ai-unclear">לא ברור: ${esc(m.proposal.unclear)}</p>` : ''}${(m.proposal.rejected || []).length ? `<p class="ai-unclear">לא נכלל: ${esc(m.proposal.rejected.join(' · '))}</p>` : ''}${m.proposal.actions.length ? (m.proposal.actions.every((_, i) => m.done?.[i]?.ok) ? '' : m.proposal.actions.some((_, i) => m.done?.[i]?.ok) ? '<small>מה שאושר כבר נשמר. שינוי אחר לא נשמר עד שתאשרו אותו בנפרד.</small>' : '<small>שום דבר לא נשמר עד שתאשרו כל שינוי בנפרד.</small>') : ''}`;
+  const msgs = aiChat.map((m) => `<div class="ai-row ${m.role}">${m.role === 'user' ? '' : `<span class="ai-avatar">${m.role === 'error' ? '!' : '✦'}</span>`}<div class="ai-msg ${m.role}">${m.proposal ? proposalHtml(m) : esc(m.text)}${(m.files || []).length ? `<div class="ai-files">${m.files.map((f) => `<button type="button" class="secondary small-btn" data-openlic="${esc(f.id)}">פתיחת הקובץ: ${esc(f.label)}</button>`).join('')}</div>` : ''}${m.csv ? `<div class="ai-files"><button type="button" class="secondary small-btn" data-aicsv="${aiChat.indexOf(m)}">ייצוא הרשימה המוצגת ל-CSV (${m.csv.rows.length} שורות)</button></div>` : ''}${m.exportAll ? `<div class="ai-files"><button type="button" class="secondary small-btn" data-aiexportall="${aiChat.indexOf(m)}">${m.exportAll.noun === 'אישורים' ? (m.exportAll.total > 500 ? `ייצוא 500 הראשונים מתוך ${m.exportAll.total} אישורים ל-CSV (קטוע)` : `ייצוא כל ${m.exportAll.total} האישורים בסינון ל-CSV`) : (m.exportAll.total > 500 ? `ייצוא 500 הראשונים מתוך ${m.exportAll.total} משתמשים ל-CSV (קטוע, בלי אימיילים)` : `ייצוא כל ${m.exportAll.total} המשתמשים ל-CSV (בלי אימיילים)`)}</button></div>` : ''}</div></div>`).join('');
+  const typing = pending ? '<div class="ai-row assistant"><span class="ai-avatar">✦</span><div class="ai-msg assistant ai-typing" aria-label="העוזר כותב"><i></i><i></i><i></i></div></div>' : '';
+  app.innerHTML = `<section class="ai-page"><div class="ai-log" id="aiLog" aria-live="polite">${aiChat.length || pending ? msgs + typing : empty}</div><div class="ai-modes" role="tablist"><button type="button" data-aimode="chat" class="${aiMode === 'chat' ? 'on' : ''}">שיחה</button><button type="button" data-aimode="tasks" class="${aiMode === 'tasks' ? 'on' : ''}">משימות</button><button type="button" data-aimode="reports" class="${aiMode === 'reports' ? 'on' : ''}">דוחות</button>${state.user && state.user.role === 'Admin' ? `<button type="button" data-aimode="rent" class="${aiMode === 'rent' ? 'on' : ''}">שכירות</button><button type="button" data-aimode="agreements" class="${aiMode === 'agreements' ? 'on' : ''}">הסכמים</button><button type="button" data-aimode="branches" class="${aiMode === 'branches' ? 'on' : ''}">סניפים</button><button type="button" data-aimode="groups" class="${aiMode === 'groups' ? 'on' : ''}">תשלום מרוכז</button><button type="button" data-aimode="notifications" class="${aiMode === 'notifications' ? 'on' : ''}">התראות</button><button type="button" data-aimode="licenses" class="${aiMode === 'licenses' ? 'on' : ''}">אישורים</button><button type="button" data-aimode="authorities" class="${aiMode === 'authorities' ? 'on' : ''}">רשויות</button><button type="button" data-aimode="team" class="${aiMode === 'team' ? 'on' : ''}">צוות</button>` : ''}</div><form id="aiForm" class="ai-composer"><textarea name="prompt" rows="1" maxlength="20000" placeholder="${aiMode === 'tasks' ? 'לדוגמה: סגור את משימת התשלום לספק' : 'כתבו כאן...'}" aria-label="הודעה לעוזר" required ${pending ? 'disabled' : ''}></textarea><button class="ai-send" id="aiSend" aria-label="שליחה" ${pending ? 'disabled' : ''}><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></form><p class="ai-note">${aiMode === 'agreements' ? 'במצב הסכמים העוזר מציע עדכון סכום, תדירות, אמצעי תשלום או תאריך ראשון, או סגירת הסכם. זה רישום במערכת בלבד, לא תשלום. כל שינוי דורש את הסיסמה שלכם.' : aiMode === 'groups' ? 'במצב תשלום מרוכז העוזר מציע איגוד תשלומים ממתינים של אותה רשות לתשלום אחד, או שינוי מצב שלו. זה רישום במערכת בלבד. שינוי מצב דורש את הסיסמה שלכם.' : aiMode === 'notifications' ? 'במצב התראות העוזר מציע שינוי מצב טיפול בהתראות קיימות (פתוחה, בטיפול, טופלה, נדחתה). אפשר לשנות בחזרה.' : aiMode === 'licenses' ? 'במצב אישורים העוזר מציע הוספת סוג אישור, הסרת סוג, העברת אישור לארכיון או מחיקת הקובץ המצורף בלבד. כל פעולה מחיקה דורשת את הסיסמה שלכם.' : aiMode === 'authorities' ? 'במצב רשויות העוזר מציע הוספת גוף תשלום או מחיקתו. מחיקה דורשת את הסיסמה שלכם, ולא ניתן למחוק גוף עם הסכם פעיל.' : aiMode === 'team' ? 'במצב צוות העוזר מציע הוספת משתמש (שם, דוא״ל, סניפים). התפקיד, הרשאת ה-AI והסיסמה הראשונית נקבעים על ידכם בכרטיס, העוזר לא רואה אותם, והאישור דורש את הסיסמה שלכם.' : aiMode === 'branches' ? 'במצב סניפים העוזר מציע פתיחה או עדכון של פרטי סניף (שם, כתובת, מנהל, טלפון). אין מחיקה. שם שכבר קיים נחסם, ואתם מאשרים כל שינוי.' : aiMode === 'reports' ? 'במצב דוחות העוזר רק בוחר דוח קריאה מרשימה קבועה. השרת מריץ אותו על מה שמותר לכם לראות. העוזר לא רואה את הנתונים ולא משנה דבר.' : aiMode === 'rent' ? 'במצב שכירות העוזר רואה רק תשלומי שכירות שלא שובצו לתשלום מרוכז. הוא מציע רישום סטטוס בלבד, ואתם מאשרים. אין כאן ביצוע תשלום.' : aiMode === 'tasks' ? 'במצב משימות העוזר רואה רק את המשימות הפתוחות שלכם ואת הסניפים שלכם. הוא מציע שינוי, ואתם מאשרים אותו לפני שמירה.' : 'במצב שיחה העוזר לא רואה את נתוני המערכת, והוא לא משנה שום דבר בעצמו.'}</p></section>`;
+  const form = document.getElementById('aiForm'); const box = form.elements.prompt;
+  const log = document.getElementById('aiLog'); log.scrollTop = log.scrollHeight;
+  if (aiMode === 'branches') {
+    // File update: CSV is read by the server with no AI; a PDF or image is read by Claude. Branch matching is done by the server.
+    const panel = document.createElement('div'); panel.className = 'ai-doc'; panel.id = 'aiBranchFilePanel';
+    panel.innerHTML = '<strong>עדכון סניפים מקובץ</strong><label class="secondary ai-doc-pick" for="aiBranchFile"><span>בחירת קובץ: <bdi dir="ltr">Excel, Word, CSV, PDF</bdi> או תמונה</span></label><input type="file" id="aiBranchFile" class="ai-doc-input" accept=".xlsx,.docx,.csv,.tsv,.txt,application/pdf,image/jpeg,image/png,image/webp"><small class="muted">קובץ <bdi dir="ltr">Excel</bdi>, <bdi dir="ltr">Word</bdi> (הטבלה הראשונה, בלי תאים ממוזגים) או <bdi dir="ltr">CSV</bdi> נקרא בשרת בלי AI. מ-Excel נקרא הגיליון הראשון בלבד, בלי מאקרו. <bdi dir="ltr">PDF</bdi> או תמונה נשלחים ל-<bdi dir="ltr">Claude</bdi> לקריאה. הקובץ עצמו לא נשמר. לכל סניף יוצג כרטיס עם לפני ואחרי, ושום דבר לא נשמר בלי אישור.</small>';
+    form.parentElement.insertBefore(panel, form);
+    const fin = panel.querySelector('#aiBranchFile');
+    const sendFile = async (file, consent) => { aiBranchPending = null; aiChat.push({ role: 'user', text: `קובץ: ${file.name}` }); try { const fd = new FormData(); fd.append('file', file); if (consent) fd.append('consentExternal', 'true'); const r = await api('/api/ai/branches/file-propose', { method: 'POST', body: fd }); aiChat.push({ role: 'assistant', text: r.summary || '', proposal: r, done: {} }); } catch (error) { aiChat.push({ role: 'error', text: error.message }); } renderAi(); };
+    // CSV/text is read by our server only. PDF/image leaves the system, so it needs an explicit send approval BEFORE upload.
+    fin.onchange = () => { const file = fin.files[0]; if (!file) return; if (/\.(xlsx|docx|csv|tsv|txt)$/i.test(file.name)) return aiPreStart(file, '/api/ai/branches/file-propose', 'branches'); if (!(['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(file.type))) { aiChat.push({ role: 'user', text: `קובץ: ${file.name}` }, { role: 'assistant', text: 'סוג הקובץ הזה לא נתמך. אפשר להעלות Excel (xlsx), Word (docx) עם טבלה, CSV, PDF או תמונה. קבצי xls או doc ישנים: שמרו כ-xlsx או docx והעלו שוב.' }); return renderAi(); } aiBranchPending = file; renderAi(); };
+    if (aiPre && aiPre.mode === 'branches') aiPreCard(panel, aiPre.endpoint);
+    if (aiBranchPending) {
+      const gate = document.createElement('div'); gate.className = 'ai-action'; gate.id = 'aiBranchConsent';
+      gate.innerHTML = `<strong>שליחת הקובץ לקריאה חיצונית</strong><div><bdi dir="ltr">${esc(aiBranchPending.name)}</bdi></div><div>תוכן הקובץ יישלח ל-Claude (Anthropic) כדי לקרוא ממנו את הטבלה. שלחו רק קובץ שמותר לשלוח. הקובץ לא נשמר במערכת, ושום דבר לא ישונה בלי אישור לכל כרטיס.</div><button type="button" class="primary small-btn" id="aiBranchConsentYes">שליחה לקריאה</button> <button type="button" class="secondary small-btn" id="aiBranchConsentNo">ביטול</button>`;
+      panel.appendChild(gate);
+      gate.querySelector('#aiBranchConsentYes').onclick = () => sendFile(aiBranchPending, true);
+      gate.querySelector('#aiBranchConsentNo').onclick = () => { aiBranchPending = null; renderAi(); };
+    }
+  }
+  if (aiMode !== 'branches' && aiMode !== 'agreements') {
+    // Attachments outside the branch-file and agreement-document flows: nothing is uploaded or read here. The user gets a clear answer instead of silence.
+    const ap = document.createElement('div'); ap.className = 'ai-doc'; ap.id = 'aiAttachPanel';
+    ap.innerHTML = `<label class="secondary ai-doc-pick" for="aiAttachFile"><span>צירוף קובץ</span></label><input type="file" id="aiAttachFile" class="ai-doc-input" accept=".xlsx,.docx,.csv,.tsv,.txt,application/pdf,image/jpeg,image/png,image/webp"><small class="muted">${aiMode === 'tasks' || aiMode === 'team' || aiMode === 'licenses' ? `בלשונית ${aiMode === 'team' ? 'צוות' : aiMode === 'licenses' ? 'אישורים (יצירת אישורים בלי קובץ מצורף)' : 'משימות'} נקראים קבצי אקסל, וורד עם טבלה או CSV בשרת בלי AI, וכל שורה דורשת אישור. PDF או תמונה נשלחים ל-Claude רק אחרי אישור מפורש (עד 20 שורות), וכל שורה עוברת בדיקה בשרת.` : 'הקובץ לא נשלח ולא נקרא בלשונית הזו.'}</small>`;
+    form.parentElement.insertBefore(ap, form);
+    if (aiPre && aiPre.mode === aiMode) aiPreCard(ap, aiPre.endpoint);
+    if (aiModelPending && (aiMode === 'tasks' || aiMode === 'team' || aiMode === 'licenses')) {
+      const gate = document.createElement('div'); gate.className = 'ai-action'; gate.id = 'aiModelConsent'; const ep = aiModelPending.endpoint;
+      gate.innerHTML = `<strong>שליחת הקובץ לקריאה חיצונית</strong><div><bdi dir="ltr">${esc(aiModelPending.file.name)}</bdi></div><div>תוכן ה-PDF או התמונה יישלח ל-Claude (Anthropic) כדי לקרוא ממנו שורות. שלחו רק קובץ שמותר לשלוח. הקובץ לא נשמר. מעובדות ומוצגות עד 20 שורות מהמסמך. שורות נוספות לא יובאו, וההודעה אחרי הקריאה תציין את הכיסוי. כל שורה עוברת בדיקה בשרת ודורשת אישור בנפרד.</div><label><input type="checkbox" id="aiModelConsentChk"> אני מאשר/ת את שליחת הקובץ</label> <button type="button" class="primary small-btn" id="aiModelConsentYes" disabled>שליחה לקריאה</button> <button type="button" class="secondary small-btn" id="aiModelConsentNo">ביטול</button>`;
+      ap.appendChild(gate); const chk = gate.querySelector('#aiModelConsentChk'); const yes = gate.querySelector('#aiModelConsentYes'); chk.onchange = () => { yes.disabled = !chk.checked; };
+      yes.onclick = async () => { if (!chk.checked) return; const pend = aiModelPending; const file = pend.file; aiModelPending = null; aiChat.push({ role: 'user', text: `קובץ: ${file.name}` }); try { const fd = new FormData(); fd.append('file', file); fd.append('consentExternal', 'true'); const r = await api(ep, { method: 'POST', body: fd }); aiChat.push({ role: 'assistant', text: r.summary || '', proposal: r, done: {} }); } catch (error) { aiChat.push({ role: 'error', text: error.message }); } renderAi(); };
+      gate.querySelector('#aiModelConsentNo').onclick = () => { aiModelPending = null; renderAi(); };
+    }
+    ap.querySelector('#aiAttachFile').onchange = async (ev) => { const file = ev.target.files[0]; if (!file) return; if ((aiMode === 'tasks' || aiMode === 'team' || aiMode === 'licenses') && ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(file.type)) { aiModelPending = { file, mode: aiMode, owner: aiPreOwner(), endpoint: aiMode === 'team' ? '/api/ai/team/file-propose' : aiMode === 'licenses' ? '/api/ai/licenses/file-propose' : '/api/ai/tasks/file-propose' }; return renderAi(); } if ((aiMode === 'tasks' || aiMode === 'team' || aiMode === 'licenses') && /\.(xlsx|docx|csv|tsv|txt)$/i.test(file.name)) return aiPreStart(file, aiMode === 'team' ? '/api/ai/team/file-propose' : aiMode === 'licenses' ? '/api/ai/licenses/file-propose' : '/api/ai/tasks/file-propose', aiMode); if ((aiMode === 'tasks' || aiMode === 'team' || aiMode === 'licenses') && /\.(xlsx|docx|csv|tsv|txt)$/i.test(file.name)) { aiChat.push({ role: 'user', text: `קובץ: ${file.name}` }); try { const fd = new FormData(); fd.append('file', file); const r = await api(aiMode === 'team' ? '/api/ai/team/file-propose' : aiMode === 'licenses' ? '/api/ai/licenses/file-propose' : '/api/ai/tasks/file-propose', { method: 'POST', body: fd }); aiChat.push({ role: 'assistant', text: r.summary || '', proposal: r, done: {} }); } catch (error) { aiChat.push({ role: 'error', text: error.message }); } return renderAi(); } const ok = /\.(xlsx|docx|csv|tsv|txt|pdf|jpe?g|png|webp)$/i.test(file.name); aiChat.push({ role: 'user', text: `קובץ: ${file.name}` }, { role: 'assistant', text: ok ? 'הקובץ לא נשלח ולא נקרא. בלשונית הזו אין קריאת קבצים. עדכון סניפים מקובץ אקסל, קובץ וורד עם טבלה, קובץ CSV, PDF או תמונה אפשרי בלשונית סניפים. העלאת מסמך להסכם שכירות אפשרית בלשונית הסכמים. כתבו את הבקשה כטקסט, או עברו ללשונית המתאימה.' : 'סוג הקובץ הזה לא נתמך, והוא לא נשלח ולא נקרא. קבצים נתמכים בלשוניות סניפים והסכמים: אקסל חדש, וורד חדש עם טבלה, CSV, PDF או תמונה. קבצי אקסל או וורד ישנים: שמרו בפורמט החדש והעלו שוב שם.' }); renderAi(); };
+  }
+  if (aiMode === 'agreements') {
+    // Document intake: no AI reading. The user picks the destination agreement explicitly; the file is saved only after confirm.
+    const panel = document.createElement('div'); panel.className = 'ai-doc'; panel.id = 'aiDocPanel';
+    const d = aiDoc;
+    const sizeKb = (n) => `${Math.max(1, Math.round(n / 1024))}KB`;
+    panel.innerHTML = !d ? `<strong>העלאת מסמך להסכם שכירות</strong><label class="secondary ai-doc-pick" for="aiDocFile">בחירת קובץ (PDF או תמונה)</label><input type="file" id="aiDocFile" class="ai-doc-input" accept="application/pdf,image/jpeg,image/png,image/webp"><small class="muted">המסמך לא נשלח ל-AI. תבחרו בעצמכם לאיזה הסכם לשמור אותו, והוא נשמר רק אחרי אישור.</small>`
+      : d.done ? `<div class="ai-action done"><strong>המסמך נשמר</strong><div><bdi dir="ltr">${esc(d.p.fileName)}</bdi> · ${esc(d.doneTo || '')}</div><button type="button" class="secondary small-btn" id="aiDocNext">העלאת מסמך נוסף</button></div>`
+      : `<div class="ai-action"><strong>שמירת מסמך: <bdi dir="ltr">${esc(d.p.fileName)}</bdi> (${sizeKb(d.p.size)})</strong><fieldset class="ai-choice"><legend>בחרו הסכם שאליו לשמור</legend>${d.p.candidates.map((c) => `<label class="check-row"><input type="radio" name="docdest" value="${esc(c.id)}"${c.preferred ? ' checked' : ''}> ${esc(c.branchName)} · ${esc(c.authorityName)}${c.detail ? `<small class="muted" style="display:block">${esc(c.detail)}</small>` : ''}${c.preferred ? ' (ההסכם שנוצר עכשיו בשיחה)' : ''}${c.suggested ? ' (שם הקובץ מתאים, ודאו בעצמכם)' : ''}${c.sameName ? ' · כבר קיים מסמך בשם הזה' : ''}${c.identical ? ' · כבר מצורף קובץ זהה בתוכן' : ''}${!c.identical && c.identicalUnchecked ? ' · חלק מהקבצים הקיימים בהסכם לא נבדקו להשוואת תוכן, ייתכן שקובץ זהה כבר מצורף' : ''}</label>`).join('')}</fieldset>${d.err ? `<div class="form-error">${esc(d.err)}</div>` : ''}<button type="button" class="primary" id="aiDocConfirm" ${d.busy ? 'disabled' : ''}>אישור ושמירה</button> <button type="button" class="secondary" id="aiDocCancel">ביטול</button><small class="muted">שום דבר לא נשמר עד שתאשרו. המסמך נשמר רק בהסכם שבחרתם.</small></div>`;
+    const existing = document.createElement('div'); existing.className = 'ai-doc'; existing.id = 'aiDocExisting';
+    existing.innerHTML = aiDocList ? (aiDocList.length ? aiDocList.map((ag) => `<div class="ai-action"><strong>${esc(ag.branchId?.name || 'סניף')} · ${esc(ag.authorityId?.name || '')}</strong>${(ag.documents || []).length ? ag.documents.map((dc) => `<div class="ai-doc-row"><bdi dir="ltr">${esc(dc.fileName || 'ללא שם')}</bdi> <button type="button" class="secondary small-btn" data-docopen="${esc(ag._id)}:${esc(dc._id)}">הורדה</button> <button type="button" class="secondary small-btn" data-docdel="${esc(ag._id)}:${esc(dc._id)}">מחיקה</button></div>`).join('') : '<small class="muted">אין מסמכים</small>'}</div>`).join('') : '<small class="muted">אין הסכמים</small>') : '<button type="button" class="secondary" id="aiDocShow">מסמכים קיימים (הורדה או מחיקה)</button>';
+    panel.appendChild(existing);
+    form.parentElement.insertBefore(panel, form);
+    const fileIn = panel.querySelector('#aiDocFile');
+    if (fileIn) fileIn.onchange = async () => { const file = fileIn.files[0]; if (!file) return; try { const fd = new FormData(); fd.append('file', file); if (aiPreferAgreement) fd.append('prefer', aiPreferAgreement); const r = await api('/api/ai/agreements/document/propose', { method: 'POST', body: fd }); aiDoc = { file, p: r }; } catch (error) { toast(error.message); } renderAi(); };
+    const show = panel.querySelector('#aiDocShow'); if (show) show.onclick = async () => { try { const r = await api('/api/rent/summary'); aiDocList = (r.agreements || []).filter((x) => x.status !== 'Closed' || (x.documents || []).length); } catch (error) { toast(error.message); } renderAi(); };
+    panel.querySelectorAll('[data-docopen]').forEach((b2) => b2.onclick = () => { const [x, y] = b2.dataset.docopen.split(':'); openRentDoc(x, y); });
+    panel.querySelectorAll('[data-docdel]').forEach((b2) => b2.onclick = async () => { const [x, y] = b2.dataset.docdel.split(':'); try { const r = await api('/api/ai/agreements/document/delete-propose', { method: 'POST', body: JSON.stringify({ agreementId: x, docId: y }) }); aiChat.push({ role: 'assistant', text: 'בדקו לפני אישור:', proposal: r, done: {} }); } catch (error) { aiChat.push({ role: 'error', text: error.message }); } renderAi(); });
+    const nextDoc = panel.querySelector('#aiDocNext'); if (nextDoc) nextDoc.onclick = () => { aiDoc = null; renderAi(); };
+    const cancel = panel.querySelector('#aiDocCancel'); if (cancel) cancel.onclick = () => { aiDoc = null; renderAi(); };
+    const ok = panel.querySelector('#aiDocConfirm');
+    if (ok) ok.onclick = async () => {
+      const choice = panel.querySelector('input[name="docdest"]:checked')?.value; if (!choice) { aiDoc.err = 'בחרו את ההסכם שאליו לשמור את המסמך'; return renderAi(); }
+      aiDoc.busy = true; aiDoc.err = ''; renderAi();
+      try { const fd = new FormData(); fd.append('file', aiDoc.file); fd.append('agreementId', choice); await api(`/api/ai/agreements/document/${aiDoc.p.proposalId}/confirm`, { method: 'POST', body: fd }); aiPreferAgreement = ''; const c = aiDoc.p.candidates.find((x) => x.id === choice); aiDoc.done = true; aiDoc.doneTo = c ? `${c.branchName} · ${c.authorityName}` : ''; }
+      catch (error) { aiDoc.err = error.message; } aiDoc.busy = false; renderAi();
+    };
+  }
+  const send = async (text) => {
+    const prompt = text.trim(); if (!prompt) return;
+    aiChat.push({ role: 'user', text: prompt }); renderAi(true);
+    try {
+      if (aiMode === 'tasks' || aiMode === 'rent' || aiMode === 'branches' || aiMode === 'team' || aiMode === 'agreements' || aiMode === 'authorities' || aiMode === 'licenses' || aiMode === 'notifications' || aiMode === 'groups') { const r = await api(aiMode === 'groups' ? '/api/ai/payment-groups/propose' : aiMode === 'notifications' ? '/api/ai/notifications/propose' : aiMode === 'licenses' ? '/api/ai/licenses/propose' : aiMode === 'authorities' ? '/api/ai/authorities/propose' : aiMode === 'rent' ? '/api/ai/rent/propose' : aiMode === 'agreements' ? '/api/ai/agreements/propose' : aiMode === 'team' ? '/api/ai/team/propose' : aiMode === 'branches' ? '/api/ai/branches/propose' : '/api/ai/tasks/propose', { method: 'POST', body: JSON.stringify({ prompt }) }); aiChat.push({ role: 'assistant', text: r.summary || (r.actions.length ? '' : 'לא נמצאה פעולה מתאימה.'), proposal: r, done: {} }); }
+      else if (aiMode === 'reports') { const r = await api('/api/ai/reports/ask', { method: 'POST', body: JSON.stringify({ prompt }) }); const line = (x) => Object.entries(x).filter(([k, v]) => k !== 'fileLicenseId' && v).map(([, v]) => v).join(' · '); aiChat.push({ role: 'assistant', files: (r.rows || []).filter((x) => x.fileLicenseId).map((x) => ({ id: x.fileLicenseId, label: [x.branch, x.type].filter(Boolean).join(' · ') })), csv: r.report && r.count ? { rows: r.rows, title: r.title } : null, exportAll: r.report === 'team_overview' && state.user?.role === 'Admin' && r.total > r.count ? { params: r.exportParams || {}, total: r.total, endpoint: '/api/ai/reports/export-team', noun: 'משתמשים' } : (['licenses_all', 'licenses_history', 'licenses_no_file', 'licenses_expiring', 'licenses_expired'].includes(r.report) && r.total > r.count && r.exportParams ? { params: r.exportParams, total: r.total, endpoint: '/api/ai/reports/export-licenses', noun: 'אישורים' } : null), text: r.report ? `${r.title}${r.days ? ` (${r.days} ימים)` : ''}${r.note ? `\nהערה: ${r.note}` : ''}${(r.filters || []).length ? `\nסינון: ${r.filters.join(' · ')}` : ''}${r.branchFilter ? `\nסינון לפי סניף: ${r.branchFilter}` : ''}${r.typeFilter ? `\nסינון לפי סוג אישור: ${r.typeFilter}` : ''}${r.count ? `\nמספר שורות בדוח: ${r.count}${r.total > r.count ? ` (מוצגות ${r.count} מתוך ${r.total}, הדוח מוגבל ל-${r.count} שורות)` : ''}\n` + r.rows.map((x) => '• ' + line(x)).join('\n') : '\nלא נמצאו נתונים בדוח הזה.'}` : r.message }); }
+      else { const r = await api('/api/ai/ask', { method: 'POST', body: JSON.stringify({ prompt }) }); aiChat.push({ role: 'assistant', text: r.text + (r.truncated ? '\n\n(התשובה נקטעה)' : '') }); }
+    }
+    catch (error) { aiChat.push({ role: 'error', text: error.message }); }
+    renderAi();
+  };
+  form.onsubmit = (e) => { e.preventDefault(); send(box.value); };
+  box.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event('submit', { cancelable: true })); } };
+  box.oninput = () => { box.style.height = 'auto'; box.style.height = Math.min(box.scrollHeight, 140) + 'px'; };
+  app.querySelectorAll('[data-aimode]').forEach((b2) => b2.onclick = () => { aiMode = b2.dataset.aimode; renderAi(); });
+  app.querySelectorAll('[data-dismiss]').forEach((b2) => b2.onclick = () => { const [mi, ai] = b2.dataset.dismiss.split(':').map(Number); const m = aiChat[mi]; if (!m.done[ai]?.ok && !m.done[ai]?.busy) { m.done[ai] = { dismissed: true }; renderAi(); } });
+  app.querySelectorAll('[data-openlic]').forEach((b2) => b2.onclick = () => openLicenseFile(b2.dataset.openlic));
+  app.querySelectorAll('[data-aiexportall]').forEach((b3) => b3.onclick = async () => { const m = aiChat[Number(b3.dataset.aiexportall)]; if (!m?.exportAll) return; try { const r = await api(m.exportAll.endpoint, { method: 'POST', body: JSON.stringify(m.exportAll.params) }); exportRowsCsv({ rows: r.rows, title: m.csv?.title || (m.exportAll.noun === 'אישורים' ? 'אישורים' : 'צוות') }); aiChat.push({ role: 'assistant', text: r.capped ? `יוצאו ${r.count} ${m.exportAll.noun} מתוך ${r.total} (המגבלה ${r.cap}). צמצמו את הסינון כדי לייצא את השאר.` : `יוצאו כל ${r.count} ה${m.exportAll.noun === 'אישורים' ? 'אישורים' : 'משתמשים'} בסינון.` }); } catch (error) { aiChat.push({ role: 'error', text: error.message }); } renderAi(); });
+  app.querySelectorAll('[data-aicsv]').forEach((b2) => b2.onclick = () => exportRowsCsv(aiChat[Number(b2.dataset.aicsv)]?.csv));
+  app.querySelectorAll('[data-aistep]').forEach((b2) => b2.onclick = async () => { const [mi, ai] = b2.dataset.aistep.split(':').map(Number); const m = aiChat[mi]; if (m.done[ai]?.ok || m.done[ai]?.busy) return; const choice = app.querySelector(`input[name="bc-${mi}-${ai}"]:checked`)?.value || ''; if (!choice) { m.done[ai] = { error: 'בחרו את הסניף המדויק' }; renderAi(); return; } m.done[ai] = { busy: true }; b2.disabled = true; try { const r = await api(`/api/ai/agreements/step/${m.proposal.actions[ai].proposalId}`, { method: 'POST', body: JSON.stringify({ branchId: choice }) }); m.done[ai] = { ok: true, stepDone: true }; aiChat.push({ role: 'assistant', text: 'שלב 2 מתוך 2:', proposal: r, done: {} }); } catch (error) { m.done[ai] = { error: error.message }; } renderAi(); });
+  app.querySelectorAll('[data-confirm]').forEach((b2) => b2.onclick = async () => { const [mi, ai] = b2.dataset.confirm.split(':').map(Number); const m = aiChat[mi]; if (m.done[ai]?.ok || m.done[ai]?.busy) return; m.done[ai] = { busy: true }; b2.disabled = true; try { const act = m.proposal.actions[ai]; const pw = act.sensitive ? (app.querySelector(`[data-pass="${mi}:${ai}"]`)?.value || '') : ''; if (act.sensitive && !pw) throw new Error('הקלידו את הסיסמה הנוכחית'); const choice = act.needsChoice ? (app.querySelector(`input[name="bc-${mi}-${ai}"]:checked`)?.value || '') : ''; if (act.needsChoice && !choice) throw new Error(act.choiceField === 'branchPayer' || act.choiceField === 'agreementPayer' ? 'בחרו את גוף המשלם המדויק' : 'בחרו את הסניף המדויק'); let extra; if (act.needsNewUser) { const q = (k) => app.querySelector(`[data-${k}="${mi}:${ai}"]`); const npw = q('nupass')?.value || ''; if (!npw) throw new Error('הקלידו סיסמה ראשונית למשתמש החדש'); extra = { newUserPassword: npw, newUserRole: q('nurole')?.value || 'Manager', newUserAiEnabled: Boolean(q('nuai')?.checked) }; } const rr = await runAction(act, pw, choice, extra); if (act.type === 'create_agreement' && rr?.result?.agreementId) aiPreferAgreement = String(rr.result.agreementId); m.done[ai] = { ok: true, payerFail: Boolean(rr?.result?.payerLinkFailed), payerNow: rr?.result?.persistedPayerName || '', pending: Boolean(rr?.result?.storagePending), cleanup: Number(rr?.result?.pendingCleanup || 0) }; await loadApp(); } catch (error) { m.done[ai] = { error: error.message }; } renderAi(); });
+  app.querySelectorAll('[data-idea]').forEach((b2) => b2.onclick = () => { box.value = b2.dataset.idea; box.focus(); });
+  if (!pending) box.focus();
+};
+const render = () => { resetScrollOnViewChange(); renderHeader(); if (state.page === 'alerts') return renderAlerts(); if (state.page === 'tasks') return renderTasks(); if (state.page === 'rent') return renderRent(); if (state.page === 'ai' && state.user.aiEnabled) return renderAi(); if (state.page === 'settings') return renderSettings(); if (state.page === 'report') return renderReport(); if (state.branchId) return renderBranch(); return renderBranches(); };
 
 // Completeness of a daycare branch = the approvals it should hold (every
 // active type defined for all branches plus types defined for this branch)
@@ -281,7 +574,7 @@ const renderBranch = async () => {
   const licenses = state.licenses.filter((l) => (l.branchId?._id || l.branchId) === branch._id);
   let types;
   try { types = await api(`/api/license-types?branchId=${branch._id}`); }
-  catch (error) { app.innerHTML = `<button class="go go-back" id="back" type="button"><i class="go-chip"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></i><span>כל הסניפים</span></button><section class="panel"><h3>לא ניתן לטעון את פרטי הסניף</h3><p>${esc(error.message)}</p><button class="secondary" id="retryBranch">ניסיון חוזר</button></section>`; document.getElementById('back').onclick = () => { state.branchId = null; render(); }; document.getElementById('retryBranch').onclick = renderBranch; return; }
+  catch (error) { if (error.stale) return; app.innerHTML = `<button class="go go-back" id="back" type="button"><i class="go-chip"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></i><span>כל הסניפים</span></button><section class="panel"><h3>לא ניתן לטעון את פרטי הסניף</h3><p>${esc(error.message)}</p><button class="secondary" id="retryBranch">ניסיון חוזר</button>${retryNote()}</section>`; document.getElementById('back').onclick = () => { state.branchId = null; render(); }; document.getElementById('retryBranch').onclick = markRetry(renderBranch); return; }
     const comp = computeCompleteness(types, licenses); const doneTypes = comp.present;
   const careItems = [...types.filter((t) => !licenses.some((l) => String(l.licenseTypeId?._id || l.licenseTypeId) === String(t._id))).map((t) => `חסר: ${t.name}`), ...licenses.filter((l) => l.status === 'Expired' || l.status === 'Expiring_Soon').map((l) => `${typeName(l.licenseTypeId)} ${l.status === 'Expired' ? 'פג תוקף' : 'לקראת פקיעה'}`)];
 app.innerHTML = `<button class="go go-back" id="back" type="button"><i class="go-chip"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></i><span>כל הסניפים</span></button><section class="branch-title"><div><div class="eyebrow">פרטי סניף</div><h2>${esc(branch.name)}</h2><p>${esc(branch.address || 'כתובת לא הוגדרה')}</p></div><div class="button-row">${state.user.role === 'Admin' ? '<button class="secondary" id="editBranch">✎ עריכת פרטים</button><button class="secondary" id="addType">＋ סוג אישור</button><button class="secondary" id="branchReport">▤ הפק דוח</button>' : ''}<button class="primary" id="addLicense">＋ העלאת אישור</button></div></section><div class="branch-top"><section class="branch-card-score ${comp.total && doneTypes === comp.total ? '' : 'incomplete'}"><small>שלמות אישורים</small><strong>${doneTypes}/${types.length}</strong><div class="score-bar"><i style="width:${types.length ? Math.round(doneTypes / types.length * 100) : 0}%"></i></div><div class="score-meta"><span>${comp.valid} בתוקף</span><span>${comp.expiring} לקראת פקיעה</span><span>${comp.expired} פגו</span><span>${comp.missing} חסרים</span></div></section>${branch.managerName || branch.phone || (branch.emails || []).length || branch.authorityId ? `<section class="panel branch-contact"><div class="section-heading"><div><h3>אנשי קשר ושיוך</h3></div></div><div class="contact-grid">${branch.managerName ? `<div><span class="muted">מנהלת</span><strong>${esc(branch.managerName)}</strong></div>` : ''}${branch.phone ? `<div><span class="muted">טלפון</span><strong dir="ltr">${esc(branch.phone)}</strong></div>` : ''}${(branch.emails || []).length ? `<div><span class="muted">מיילים</span><strong>${branch.emails.map((em) => esc(em)).join(', ')}</strong></div>` : ''}${branch.authorityId ? `<div><span class="muted">מקבל התשלום (שכירות)</span><strong>${esc(branch.authorityId.name || '')}${branch.authorityId.type === 'private' ? ' · פרטי' : ''}</strong></div>` : ''}</div></section>` : ''}<section class="branch-card-care ${careItems.length ? '' : 'ok'}"><h3>${careItems.length ? 'דורש טיפול' : 'הכל תקין'}</h3><p>${careItems.length ? esc(careItems.join(' · ')) : 'כל סוגי האישורים קיימים ובתוקף.'}</p>${state.user.role === 'Admin' && careItems.length ? '<button class="primary" id="careUpload">העלאת אישור</button>' : ''}</section></div><section class="panel"><div class="section-heading"><div><h3>אישורי הסניף</h3><p>האישור החדש ביותר מכל סוג מוצג כאן</p></div><span class="muted">${licenses.length} פעילים</span></div>${licenses.length ? `<input type="search" class="search-input" id="licenseSearch" placeholder="חיפוש אישור לפי סוג או שם קובץ" aria-label="חיפוש אישור"><div class="license-list" id="licenseList">${licenses.map((license) => renderLicenseCard(license, { name: typeName(license.licenseTypeId), statusClass: statusClass(license.status), statusText: statusText(license.status), date })).join('')}</div><div class="empty-state small" id="noLicenseMatches" hidden><span>▤</span><h3>לא נמצאו אישורים תואמים</h3><p>נסו לשנות את מילות החיפוש.</p></div>` : `<div class="empty-state small"><span>▤</span><h3>אין עדיין אישורים בסניף</h3><p>הגדירו סוג אישור והעלו את המסמך הראשון.</p></div>`}</section><section class="panel"><div class="section-heading"><div><h3>סוגי האישורים לסניף</h3><p>סוגים כלליים וגם סוגים שהוגדרו רק לסניף זה</p></div></div><div class="type-chips" id="branchTypeChips">${types.map((t) => { const have = licenses.find((l) => String(l.licenseTypeId?._id || l.licenseTypeId) === String(t._id)); const st = !have ? ['missing', 'חסר'] : have.status === 'Expired' ? ['expired', 'קיים · פג תוקף'] : ['present', 'קיים']; return `<span class="type-chip">${esc(t.name)}${t.branchId ? '<small>סניף זה</small>' : '<small>כל הסניפים</small>'}<small class="type-state ${st[0]}">${st[1]}</small></span>`; }).join('') || '<span class="muted">לא הוגדרו עדיין סוגי אישור</span>'}</div></section><section id="historyPanel"></section>`;
@@ -312,7 +605,7 @@ app.innerHTML = `<button class="go go-back" id="back" type="button"><i class="go
     let rows;
     try { rows = await api(`/api/licenses/${button.dataset.history}/history`); } catch (error) { toast(error.message, 'danger'); return; }
     const panel = document.getElementById('historyPanel');
-    panel.innerHTML = `<section class="panel"><div class="section-heading"><div><h3>היסטוריית חידושים · ${esc(typeName(rows[0]?.licenseTypeId))}</h3><p>הגרסאות הקודמות נשמרות לעיון</p></div><button class="icon-button" id="closeHistory">×</button></div><div class="history-list">${rows.map((row) => `<div class="history-row"><span class="history-mark">${row.lifecycle === 'Active' ? 'פעיל' : 'הוחלף'}</span><strong>${date(row.issueDate)} — ${date(row.expiryDate)}</strong><span>${row.fileName && row.fileUrl ? `<button class="file-link link-button" data-open-file="${row._id}">${esc(row.fileName)}</button> <button class="text-button danger-text" data-delete-license-file="${row._id}" data-file-name="${esc(row.fileName)}">מחיקת מסמך</button>` : 'ללא קובץ מצורף'}</span><span class="muted">הועלה ${date(row.createdAt)}</span></div>`).join('')}</div></section>`;
+    panel.innerHTML = `<section class="panel"><div class="section-heading"><div><h3>היסטוריית חידושים · ${esc(typeName(rows[0]?.licenseTypeId))}</h3><p>הגרסאות הקודמות נשמרות לעיון</p></div><button class="icon-button" id="closeHistory">×</button></div><div class="history-list">${rows.map((row) => `<div class="lic-hist-row"><div class="lic-hist-head"><span class="history-mark">${row.lifecycle === 'Active' ? 'פעיל' : 'הוחלף'}</span><span class="muted">הועלה <bdi dir="ltr">${date(row.createdAt)}</bdi></span></div><dl class="lic-hist-dates"><div><dt>הונפק</dt><dd><bdi dir="ltr">${date(row.issueDate)}</bdi></dd></div><div><dt>בתוקף עד</dt><dd><bdi dir="ltr">${date(row.expiryDate)}</bdi></dd></div></dl><div class="lic-hist-file">${row.fileName && row.fileUrl ? `<button class="file-link link-button" data-open-file="${row._id}"><bdi dir="auto">${esc(row.fileName)}</bdi></button><button class="text-button danger-text" data-delete-license-file="${row._id}" data-file-name="${esc(row.fileName)}">מחיקת מסמך</button>` : (row.pendingFileDeletion ? '<span class="lic-hist-pending">הקישור לקובץ הוסר. מחיקת הקובץ עצמו מהאחסון עדיין ממתינה ולא הושלמה</span>' : '<span class="muted">ללא קובץ מצורף</span>')}</div></div>`).join('')}</div></section>`;
     autoCollapse(panel, 'lic-hist');
     document.getElementById('closeHistory').onclick = () => panel.innerHTML = '';
     panel.querySelectorAll('[data-open-file]').forEach((button) => button.onclick = () => openLicenseFile(button.dataset.openFile));
@@ -342,9 +635,9 @@ const confirmDeleteBranch = (branch) => {
   m.wrap.querySelector('[data-cancel-delete]').onclick = m.close;
   m.wrap.querySelector('#confirmBranchDelete').onclick = async () => {
     try {
-      await api(`/api/branches/${branch._id}`, { method: 'DELETE' });
+      const r = await api(`/api/branches/${branch._id}`, { method: 'DELETE' });
       m.close();
-      toast('הסניף נמחק', 'success');
+      toast(Number(r?.pendingCleanup) > 0 ? 'הסניף נמחק. ניקוי של אישורים או קבצים שנוצרו בזמן המחיקה ממתין ויושלם אוטומטית ברקע' : 'הסניף נמחק', 'success');
       await loadApp();
       render();
     } catch (error) { toast(error.message, 'danger'); }
@@ -375,7 +668,7 @@ const licenseTypeForm = (branch = null) => {
 const licenseForm = (selectedBranch = null, availableTypes = state.types) => {
   const branchOptions = selectedBranch ? `<option value="${selectedBranch._id}">${esc(selectedBranch.name)}</option>` : state.branches.map((b) => `<option value="${b._id}">${esc(b.name)}</option>`).join('');
   const initialTypes = selectedBranch ? availableTypes : availableTypes.filter((t) => !t.branchId);
-  const m = modal('העלאת אישור שהתקבל', `<form id="licenseForm" class="form-grid"><label>סניף<select name="branchId" required>${branchOptions}</select></label><label>סוג אישור<select name="licenseTypeId" required>${initialTypes.map((t) => `<option value="${t._id}">${esc(t.name)}</option>`).join('')}</select></label><div class="two-col"><label>תאריך תחילת תוקף<input name="issueDate" type="date" required></label><label>תאריך פקיעה<input name="expiryDate" type="date" required></label></div><p class="inline-hint">תאריך הפקיעה ממולא אוטומטית לפי תקופת האישור שבשם הסוג - אפשר לשנות אותו ידנית לפי המסמך.</p><label class="file-field">מסמך (PDF או תמונה)<input name="file" type="file" accept=".pdf,image/*"><small>עד 15MB. בהעלאת חידוש, האישור הקודם יישמר בהיסטוריה.</small></label><label class="check-field"><input type="checkbox" name="deleteOldFile" value="true"> מחק גם את המסמך של האישור המוחלף, אם קיים (ללא סימון הוא נשמר בהיסטוריה)</label><button class="primary" ${initialTypes.length ? '' : 'disabled'}>שמירת אישור</button>${initialTypes.length ? '' : '<p class="inline-hint">קודם הגדירו סוג אישור לסניף הזה.</p>'}</form>`);
+  const m = modal('העלאת אישור שהתקבל', `<form id="licenseForm" class="form-grid"><label>סניף<select name="branchId" required>${branchOptions}</select></label><label>סוג אישור<select name="licenseTypeId" required>${initialTypes.map((t) => `<option value="${t._id}">${esc(t.name)}</option>`).join('')}</select></label><div class="two-col"><label>תאריך תחילת תוקף<input name="issueDate" type="date" required></label><label>תאריך פקיעה<input name="expiryDate" type="date" required></label></div><p class="inline-hint">תאריך הפקיעה ממולא אוטומטית לפי תקופת האישור שבשם הסוג - אפשר לשנות אותו ידנית לפי המסמך.</p><label class="file-field">מסמך (PDF או תמונה)<input name="file" type="file" accept=".pdf,image/*"><small>עד 15MB. בהעלאת חידוש, האישור הקודם יישמר בהיסטוריה.</small></label>${state.user.aiEnabled ? '<div class="ai-intake" id="aiIntake"><button type="button" class="secondary" id="aiRead" disabled>קרא את המסמך עם AI</button><small id="aiReadHint">בחרו מסמך (PDF או תמונה עד 5MB). הוא יישלח ל-Anthropic לקריאה, והפרטים יוצעו לבדיקה בלבד.</small></div><label class="check-row" id="aiConfirmRow" hidden><input type="checkbox" id="aiConfirm"> בדקתי את הפרטים מול המסמך</label>' : ''}<label class="check-field"><input type="checkbox" name="deleteOldFile" value="true"> מחק גם את המסמך של האישור המוחלף, אם קיים (ללא סימון הוא נשמר בהיסטוריה)</label><button class="primary" ${initialTypes.length ? '' : 'disabled'}>שמירת אישור</button>${initialTypes.length ? '' : '<p class="inline-hint">קודם הגדירו סוג אישור לסניף הזה.</p>'}</form>`);
   // Expiry auto-fill from the validity period encoded in the type name
   // ("5 שנתי" = five years, "שנתי" = one year). A manual edit always wins;
   // clearing the field re-enables auto-fill. Types without a clear period
@@ -402,8 +695,45 @@ const licenseForm = (selectedBranch = null, availableTypes = state.types) => {
     const submit = m.wrap.querySelector('button.primary'); submit.disabled = !types.length;
     autofillExpiry();
   };
+  // AI intake (aiEnabled only): proposes values from the document. Nothing is saved
+  // until the user reviews the fields, ticks the confirmation and saves normally.
+  let aiProposalId = '';
+  const aiBtn = m.wrap.querySelector('#aiRead');
+  if (aiBtn) {
+    const fileInput = m.wrap.querySelector('[name="file"]'); const hint = m.wrap.querySelector('#aiReadHint'); const confirmRow = m.wrap.querySelector('#aiConfirmRow'); const confirmBox = m.wrap.querySelector('#aiConfirm');
+    const badge = (input, text, kind) => { input.closest('label')?.querySelector('.ai-badge')?.remove(); const b = document.createElement('small'); b.className = `ai-badge ${kind}`; b.textContent = text; input.closest('label')?.appendChild(b); };
+    fileInput.addEventListener('change', () => { aiBtn.disabled = !fileInput.files[0]; });
+    aiBtn.onclick = async () => {
+      const file = fileInput.files[0]; if (!file) return;
+      const names = [...typeSelect.options].map((o) => o.textContent);
+      const fd = new FormData(); fd.append('file', file); fd.append('typeNames', JSON.stringify(names)); fd.append('consentExternal', 'true'); // the button and its visible disclosure are the send approval
+      aiBtn.disabled = true; aiBtn.textContent = 'קורא את המסמך…';
+      try {
+        const r = await api('/api/ai/license-extract', { method: 'POST', body: fd }); aiProposalId = r.proposalId || '';
+        const unclear = new Set(r.unclear || []);
+        const opt = [...typeSelect.options].find((o) => o.textContent === r.licenseType);
+        if (opt) { typeSelect.value = opt.value; badge(typeSelect, 'הוצע על ידי AI · לבדיקה', 'proposed'); } else badge(typeSelect, 'לא ברור במסמך · לבחירה ידנית', 'unclear');
+        for (const [input, key] of [[issueInput, 'issueDate'], [expiryInput, 'expiryDate']]) {
+          if (!unclear.has(key) && r[key]) { input.value = r[key]; if (key === 'expiryDate') expiryTouched = true; badge(input, 'הוצע על ידי AI · לבדיקה', 'proposed'); }
+          else badge(input, 'לא ברור במסמך · למילוי ידני', 'unclear');
+        }
+        hint.textContent = [r.documentBranch ? `במסמך מופיע: ${r.documentBranch}. זה טקסט מהמסמך בלבד, ודאו בעצמכם שזה הסניף שנבחר.` : 'במסמך לא זוהה שם מעון או סניף. בחרו את הסניף ידנית.', r.note || '', 'השדות המסומנים הם הצעה בלבד. שום דבר לא נשמר עד שתאשרו ותשמרו.'].filter(Boolean).join(' ');
+        confirmRow.hidden = false; confirmBox.checked = false;
+      } catch (error) { toast(error.message, 'danger'); }
+      aiBtn.textContent = 'קרא את המסמך עם AI'; aiBtn.disabled = !fileInput.files[0];
+    };
+    m.wrap.querySelector('form').addEventListener('submit', (e) => { if (!confirmRow.hidden && !confirmBox.checked) { e.preventDefault(); e.stopImmediatePropagation(); toast('סמנו שבדקתם את הפרטים מול המסמך לפני השמירה', 'warning'); return; } if (aiProposalId && !confirmRow.hidden) { const hf = (n, v) => { let i = m.wrap.querySelector(`input[name="${n}"][type="hidden"]`); if (!i) { i = document.createElement('input'); i.type = 'hidden'; i.name = n; m.wrap.querySelector('form').appendChild(i); } i.value = v; }; hf('aiProposalId', aiProposalId); hf('aiConfirmed', 'true'); } }, true);
+  }
   if (!selectedBranch && state.branches.length) m.wrap.querySelector('[name="branchId"]').dispatchEvent(new Event('change'));
-  m.wrap.querySelector('form').onsubmit = async (e) => { e.preventDefault(); const f = new FormData(e.currentTarget); if (new Date(f.get('expiryDate')) < new Date(f.get('issueDate'))) return toast('תאריך הפקיעה חייב להיות אחרי תאריך ההתחלה', 'warning'); try { await api('/api/licenses', { method: 'POST', body: f }); m.close(); toast('האישור נשמר. אם היה אישור קודם, הוא הועבר להיסטוריה.', 'success'); await loadApp(); if (state.branchId) await renderBranch(); } catch (error) { toast(error.message, 'danger'); } };
+  m.wrap.querySelector('form').onsubmit = async (e) => {
+    e.preventDefault(); const form = e.currentTarget; const f = new FormData(form);
+    if (new Date(f.get('expiryDate')) < new Date(f.get('issueDate'))) return toast('תאריך הפקיעה חייב להיות אחרי תאריך ההתחלה', 'warning');
+    try { await api('/api/licenses', { method: 'POST', body: f }); m.close(); toast('האישור נשמר.', 'success'); await loadApp(); if (state.branchId) await renderBranch(); }
+    catch (error) {
+      if (error.status === 409 && error.data?.code === 'renewal_required' && error.data.existing?.id) { confirmLicenseRenewal(m, form, error.data.existing); return; }
+      toast(error.message, 'danger');
+    }
+  };
 };
 
 
@@ -533,7 +863,7 @@ const taskFilters = [['all', 'הכל'], ['To_Do', 'לביצוע'], ['In_Progress
 const renderTasks = async () => {
   const isTeam = state.user.role === 'Admin' && state.taskScope === 'team';
   let tasks;
-  try { tasks = await api(`/api/tasks${isTeam ? '?scope=all' : ''}`); } catch (error) { app.innerHTML = `<section class="panel"><h3>לא ניתן לטעון את המשימות</h3><p>${esc(error.message)}</p><button class="secondary" id="retryTasks">ניסיון חוזר</button></section>`; document.getElementById('retryTasks').onclick = renderTasks; return; }
+  try { tasks = await api(`/api/tasks${isTeam ? '?scope=all' : ''}`); } catch (error) { if (error.stale) return; app.innerHTML = `<section class="panel"><h3>לא ניתן לטעון את המשימות</h3><p>${esc(error.message)}</p><button class="secondary" id="retryTasks">ניסיון חוזר</button>${retryNote()}</section>`; document.getElementById('retryTasks').onclick = markRetry(renderTasks); return; }
   if (!isTeam) state.tasks = tasks;
   renderHeader();
   const filtered = state.taskFilter === 'all' ? tasks : tasks.filter((task) => task.status === state.taskFilter);
@@ -622,7 +952,7 @@ const openRentDoc = async (agreementId, docId) => {
 };
 
 const confirmDeleteRentDoc = (agreementId, docId, fileName, onDeleted) => {
-  const m = modal('מחיקת מסמך שכירות', `<div class="form-grid"><p>למחוק את המסמך <strong>${esc(fileName || '')}</strong>?</p><p class="muted">הסכם השכירות והתשלומים נשארים. לא ניתן לשחזר את הקובץ אחרי המחיקה.</p><div class="button-row"><button class="danger" id="confirmDeleteRentDoc">מחיקת המסמך</button><button class="secondary" data-cancel>ביטול</button></div></div>`);
+  const m = modal('מחיקת מסמך שכירות', `<div class="form-grid"><p>למחוק את המסמך <strong><bdi dir="ltr">${esc(fileName || '')}</bdi></strong>?</p><p class="muted">הסכם השכירות והתשלומים נשארים. לא ניתן לשחזר את הקובץ אחרי המחיקה.</p><div class="button-row"><button class="danger" id="confirmDeleteRentDoc">מחיקת המסמך</button><button class="secondary" data-cancel>ביטול</button></div></div>`);
   m.wrap.querySelector('[data-cancel]').onclick = m.close;
   m.wrap.querySelector('#confirmDeleteRentDoc').onclick = async () => { try { await api(`/api/rent/agreements/${agreementId}/documents/${docId}`, { method: 'DELETE' }); m.close(); toast('המסמך נמחק', 'success'); await renderRent(); if (onDeleted) onDeleted(docId); } catch (error) { toast(error.message, 'danger'); } };
 };
@@ -658,9 +988,9 @@ const rentDocsModal = (agreement) => {
 const renderRent = async () => {
   let data;
   try { data = await api('/api/rent/summary'); }
-  catch (error) {
-    app.innerHTML = `<section class="panel"><h3>לא ניתן לטעון את נתוני השכירות</h3><p>${esc(error.message)}</p><button class="secondary" id="retryRent">ניסיון חוזר</button></section>`;
-    document.getElementById('retryRent').onclick = renderRent;
+  catch (error) { if (error.stale) return;
+    app.innerHTML = `<section class="panel"><h3>לא ניתן לטעון את נתוני השכירות</h3><p>${esc(error.message)}</p><button class="secondary" id="retryRent">ניסיון חוזר</button>${retryNote()}</section>`;
+    document.getElementById('retryRent').onclick = markRetry(renderRent);
     return;
   }
   state.rent = data;
@@ -991,8 +1321,8 @@ const runNotificationSelfTest = () => {
 
 const renderSettings = async () => {
   let users;
-  try { users = await api('/api/users'); } catch (error) { app.innerHTML = `<section class="panel"><h3>לא ניתן לטעון את ההגדרות</h3><p>${esc(error.message)}</p><button class="secondary" id="retrySettings">ניסיון חוזר</button></section>`; document.getElementById('retrySettings').onclick = renderSettings; return; }
-  app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">ניהול החשבון</div><h2>הגדרות וצוות</h2><p>הגדירו את האישורים הנדרשים והחליטו למי יש גישה לכל סניף.</p></div></section><section class="settings-grid"><section class="panel"><div class="section-heading"><div><h3>סוגי אישורים</h3><p>לכל הסניפים או לסניף מסוים</p></div><button class="primary small-btn" id="newType">＋ סוג אישור</button></div><div class="settings-types" id="typeList">${state.types.map((type, i) => `<div class="settings-type"${i >= 7 ? ' data-extra-type hidden' : ''}><span>${esc(type.name)}<small>${type.branchId ? `רק ${esc(branchName(type.branchId))}` : 'כל הסניפים'}</small></span><button class="text-button danger-text" data-remove-type="${type._id}">הסרה</button></div>`).join('') || '<p class="muted">עדיין לא הוגדרו סוגי אישורים.</p>'}</div>${state.types.length > 7 ? `<button class="secondary small-btn full" id="toggleTypes">${collapseLabel(state.types.length - 7, false)}</button>` : ''}</section><section class="panel"><div class="section-heading"><div><h3>משתמשים</h3><p>משתמשים יכולים לטפל באישורים בסניפים שהוקצו להם</p></div><button class="primary small-btn" id="newUser">＋ הוספת משתמש</button></div><div class="settings-types" id="userList">${users.map((u) => `<div class="settings-type"><span>${esc(u.name)}<small>${esc(u.email)} · ${u.role === 'Admin' ? 'גישה מלאה לכל הסניפים' : (u.accessibleBranches || []).map((b) => esc(b.name)).join(', ') || 'ללא סניפים'}</small></span><b class="role-label">${u.role === 'Admin' ? 'מנהל שותף' : 'משתמש'}</b></div>`).join('') || '<p class="muted">אין עדיין משתמשים נוספים.</p>'}</div></section><section class="panel"><div class="section-heading"><div><h3>בדיקת התראות</h3><p>שליחת שלוש התראות בדיקה של Windows (אישור, שכירות וסיכום). ההתראות מסומנות כבדיקה ולא יוצרות שום נתון אמיתי. הן יקפצו 10 שניות אחרי הלחיצה, כך שאפשר לסגור את החלון ב־X ולבדוק שהן מגיעות גם כשהתוכנה מוסתרת. לחיצה על התראה מחזירה לתוכנה ופותחת את המסך המתאים.</p></div><button class="primary small-btn" id="testToasts">שליחת התראות בדיקה</button></div></section></section>`;
+  try { users = await api('/api/users'); } catch (error) { if (error.stale) return; app.innerHTML = `<section class="panel"><h3>לא ניתן לטעון את ההגדרות</h3><p>${esc(error.message)}</p><button class="secondary" id="retrySettings">ניסיון חוזר</button>${retryNote()}</section>`; document.getElementById('retrySettings').onclick = markRetry(renderSettings); return; }
+  app.innerHTML = `<section class="welcome-row"><div><div class="eyebrow">ניהול החשבון</div><h2>הגדרות וצוות</h2><p>הגדירו את האישורים הנדרשים והחליטו למי יש גישה לכל סניף.</p></div></section><section class="settings-grid"><section class="panel"><div class="section-heading"><div><h3>סוגי אישורים</h3><p>לכל הסניפים או לסניף מסוים</p></div><button class="primary small-btn" id="newType">＋ סוג אישור</button></div><div class="settings-types" id="typeList">${state.types.map((type, i) => `<div class="settings-type"${i >= 7 ? ' data-extra-type hidden' : ''}><span>${esc(type.name)}<small>${type.branchId ? `רק ${esc(branchName(type.branchId))}` : 'כל הסניפים'}</small></span><button class="text-button danger-text" data-remove-type="${type._id}">הסרה</button></div>`).join('') || '<p class="muted">עדיין לא הוגדרו סוגי אישורים.</p>'}</div>${state.types.length > 7 ? `<button class="secondary small-btn full" id="toggleTypes">${collapseLabel(state.types.length - 7, false)}</button>` : ''}</section><section class="panel"><div class="section-heading"><div><h3>משתמשים</h3><p>משתמשים יכולים לטפל באישורים בסניפים שהוקצו להם</p></div><button class="primary small-btn" id="newUser">＋ הוספת משתמש</button></div><div class="settings-types" id="userList">${users.map((u) => `<div class="settings-type"><span>${esc(u.name)}<small>${esc(u.email)} · ${u.role === 'Admin' ? 'גישה מלאה לכל הסניפים' : (u.accessibleBranches || []).map((b) => esc(b.name)).join(', ') || 'ללא סניפים'}</small></span><b class="role-label">${u.role === 'Admin' ? 'מנהל שותף' : 'משתמש'}${u.aiEnabled ? ' · AI' : ''}</b></div>`).join('') || '<p class="muted">אין עדיין משתמשים נוספים.</p>'}</div></section><section class="panel"><div class="section-heading"><div><h3>בדיקת התראות</h3><p>שליחת שלוש התראות בדיקה של Windows (אישור, שכירות וסיכום). ההתראות מסומנות כבדיקה ולא יוצרות שום נתון אמיתי. הן יקפצו 10 שניות אחרי הלחיצה, כך שאפשר לסגור את החלון ב־X ולבדוק שהן מגיעות גם כשהתוכנה מוסתרת. לחיצה על התראה מחזירה לתוכנה ופותחת את המסך המתאים.</p></div><button class="primary small-btn" id="testToasts">שליחת התראות בדיקה</button></div></section></section>`;
   collapseList(document.getElementById('userList'), { itemSelector: '.settings-type', limit: LIST_LIMITS.row, key: 'users' });
   document.getElementById('testToasts').onclick = runNotificationSelfTest;
   document.getElementById('newType').onclick = () => licenseTypeForm();
@@ -1001,10 +1331,10 @@ const renderSettings = async () => {
   app.querySelectorAll('[data-remove-type]').forEach((button) => button.onclick = async () => { if (!confirm('להסיר את סוג האישור מהרשימה הפעילה? מסמכים שכבר הועלו יישמרו.')) return; try { await api(`/api/license-types/${button.dataset.removeType}`, { method: 'DELETE' }); await loadApp(); state.page = 'settings'; render(); } catch (error) { toast(error.message, 'danger'); } });
 };
 const createUserForm = () => {
-  const m = modal('הוספת משתמש', `<form id="userForm" class="form-grid"><label>שם מלא<input name="name" required></label><label>דוא״ל<input name="email" type="email" required></label><label>סיסמה ראשונית<input name="password" type="password" minlength="8" required></label><fieldset><legend>תפקיד</legend><label class="check-row"><input type="radio" name="role" value="Manager" checked>משתמש - צופה ומעדכן רק בסניפים שיסומנו</label><label class="check-row"><input type="radio" name="role" value="Admin">מנהל שותף - אותן ההרשאות ואותם הנתונים שלך, כולל כל הסניפים וההגדרות</label></fieldset><fieldset id="branchAccess"><legend>גישה לסניפים</legend>${state.branches.map((b) => `<label class="check-row"><input type="checkbox" name="branches" value="${b._id}">${esc(b.name)}</label>`).join('') || '<p class="muted">צריך ליצור סניף לפני הוספת משתמש.</p>'}</fieldset><button class="primary">יצירת משתמש</button></form>`);
+  const m = modal('הוספת משתמש', `<form id="userForm" class="form-grid"><label>שם מלא<input name="name" required></label><label>דוא״ל<input name="email" type="email" required></label><label>סיסמה ראשונית<input name="password" type="password" minlength="8" required></label><fieldset><legend>תפקיד</legend><label class="check-row"><input type="radio" name="role" value="Manager" checked>משתמש - צופה ומעדכן רק בסניפים שיסומנו</label><label class="check-row"><input type="radio" name="role" value="Admin">מנהל שותף - אותן ההרשאות ואותם הנתונים שלך, כולל כל הסניפים וההגדרות</label></fieldset><label class="check-row"><input type="checkbox" name="aiEnabled">אפשר שימוש בעוזר ה-AI</label><fieldset id="branchAccess"><legend>גישה לסניפים</legend>${state.branches.map((b) => `<label class="check-row"><input type="checkbox" name="branches" value="${b._id}">${esc(b.name)}</label>`).join('') || '<p class="muted">צריך ליצור סניף לפני הוספת משתמש.</p>'}</fieldset><button class="primary">יצירת משתמש</button></form>`);
   const branchAccess = m.wrap.querySelector('#branchAccess');
   m.wrap.querySelectorAll('input[name="role"]').forEach((radio) => radio.onchange = () => { branchAccess.hidden = m.wrap.querySelector('input[name="role"]:checked').value === 'Admin'; });
-  m.wrap.querySelector('form').onsubmit = async (e) => { e.preventDefault(); const f = new FormData(e.currentTarget); const role = f.get('role'); try { await api('/api/users', { method: 'POST', body: JSON.stringify({ name: f.get('name'), email: f.get('email'), password: f.get('password'), role, accessibleBranches: role === 'Admin' ? [] : f.getAll('branches') }) }); m.close(); toast(role === 'Admin' ? 'המנהל השותף נוסף' : 'המשתמש נוסף', 'success'); await loadApp(); state.page = 'settings'; render(); } catch (error) { toast(error.message, 'danger'); } };
+  m.wrap.querySelector('form').onsubmit = async (e) => { e.preventDefault(); const f = new FormData(e.currentTarget); const role = f.get('role'); try { await api('/api/users', { method: 'POST', body: JSON.stringify({ name: f.get('name'), email: f.get('email'), password: f.get('password'), role, accessibleBranches: role === 'Admin' ? [] : f.getAll('branches'), aiEnabled: f.get('aiEnabled') === 'on' }) }); m.close(); toast(role === 'Admin' ? 'המנהל השותף נוסף' : 'המשתמש נוסף', 'success'); await loadApp(); state.page = 'settings'; render(); } catch (error) { toast(error.message, 'danger'); } };
 };
 
 // ----- In-app updates -----
@@ -1129,4 +1459,20 @@ const flashRow = (selector) => {
   setTimeout(() => row.classList.remove('row-flash'), 4000);
 };
 setInterval(() => { if (state.user) loadApp(); }, 10 * 60 * 1000);
-loadApp().catch((error) => { renderAuth(); toast(error.message || 'לא ניתן לפתוח את KinderGuard כרגע.', 'danger'); });
+// Back online: renew the session and re-run whichever "ניסיון חוזר" panel is on screen, so the user does not have to find the button.
+window.addEventListener('online', async () => {
+  if (!state.user) return;
+  const btn = document.querySelector('[id^="retry"]'); if (!btn) return;
+  const gen = sessionGen;
+  const fresh = await renewToken();
+  // Only retry if the renewal worked, this is still the same session, and that exact button is still on screen:
+  // otherwise a detached or late click could draw an error panel over a login screen.
+  if (!fresh || gen !== sessionGen || !state.user || !btn.isConnected) return;
+  btn.click();
+});
+const resetLinkMatch = location.hash.match(/^#reset=([0-9a-f]{64})$/);
+if (resetLinkMatch) {
+  renderReset(resetLinkMatch[1]);
+} else {
+  loadApp().catch((error) => { renderAuth(); toast(error.message || 'לא ניתן לפתוח את KinderGuard כרגע.', 'danger'); });
+}

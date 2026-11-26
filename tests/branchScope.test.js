@@ -34,7 +34,7 @@ afterAll(async () => { await mongoose.disconnect(); if (mongoServer) await mongo
 
 const createManager = async (branches) => {
   const email = `mgr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`;
-  await request(app).post('/api/users').set('Authorization', `Bearer ${adminToken}`).send({ name: 'Manager', email, password: 'Password123', accessibleBranches: branches }).expect(201);
+  await request(app).post('/api/users').set('Authorization', `Bearer ${adminToken}`).send({ name: `Manager-${Math.random().toString(36).slice(2)}`, email, password: 'Password123', accessibleBranches: branches }).expect(201);
   const login = await request(app).post('/api/users/login').send({ email, password: 'Password123' }).expect(200);
   return login.body.token;
 };

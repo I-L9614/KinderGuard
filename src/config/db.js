@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { verifyNameKeyIndex, settleModelInit, verifyAuthorityNameKeyIndex } from '../utils/nameKeyIndex.js';
 
 // Idempotent index migration for databases created before v0.3.5: they carry a
 // unique, NON-sparse index on refreshtokens.token. Since 0.3.5 stores only the
@@ -26,6 +27,8 @@ export const ensureRefreshTokenIndexShape = async (connection = mongoose.connect
   }
 };
 
+
+
 const connectDB = async () => {
   const uri = process.env.MONGO_URI;
   if (!uri) {
@@ -36,6 +39,23 @@ const connectDB = async () => {
 
   console.log(`MongoDB connected: ${conn.connection.host}`);
   await ensureRefreshTokenIndexShape(conn.connection);
+  // Readiness proof for name uniqueness: User.init() resolves after the
+  // autoIndex build finishes, so this verification observes the real index,
+  // not a hoped-for one. Missing or wrong shape: name creation/rename fails
+  // closed (see utils/nameKeyIndex.js) until the approved repair script runs;
+  // logins are unaffected.
+  const { default: User } = await import('../models/User.js');
+  await settleModelInit(User);
+  if (!(await verifyNameKeyIndex(conn.connection))) {
+    console.error('users nameKey_1 index missing or wrong shape: name creation/rename refuses until scripts/ensureNameKeyIndex.mjs runs. Logins unaffected.');
+  }
+  // Rollout visibility only (autoIndex is off for Authority by design): the
+  // duplicate-name reconcile mode is deterministic with or without this
+  // index, so nothing fails closed here - the log tells the operator whether
+  // the approved migration script has run yet.
+  if (!(await verifyAuthorityNameKeyIndex(conn.connection))) {
+    console.log('authorities adminId_1_nameKey_1 index not present yet: duplicate-name protection is in reconcile mode until the approved scripts/migrate-authority-nameKey.js --apply runs.');
+  }
   return conn;
 };
 

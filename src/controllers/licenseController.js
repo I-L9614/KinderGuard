@@ -6,6 +6,7 @@ import { getAdminId, hasBranchAccess } from '../utils/access.js';
 import { uploadFileToS3, downloadFileFromS3, deleteFileFromS3 } from '../services/s3Service.js';
 import { daysUntil } from '../utils/israelTime.js';
 import { ALLOWED_UPLOAD_MIME, matchesDeclaredType } from '../utils/uploadTypes.js';
+import { activeUniqueIndexPresent } from '../utils/licenseIndex.js';
 
 export const statusForExpiry = (expiryDate) => {
   const days = daysUntil(expiryDate);
@@ -14,14 +15,39 @@ export const statusForExpiry = (expiryDate) => {
   return 'Valid';
 };
 
+const RENEWAL_REQUIRED_MESSAGE = 'כבר קיים אישור פעיל מסוג זה לסניף. אם זו התחדשות, אשרו במפורש שהאישור הקיים מוחלף בחדש.';
+const renewalRequiredBody = (existing) => ({
+  code: 'renewal_required',
+  message: RENEWAL_REQUIRED_MESSAGE,
+  ...(existing ? { existing: { id: String(existing._id), issueDate: existing.issueDate, expiryDate: existing.expiryDate, fileName: existing.fileName || '' } } : {}),
+});
+
+export const MANUAL_NO_INDEX_MESSAGE = 'יצירת אישורים לא זמינה כרגע: חסרה הגנה במסד הנתונים מפני שני אישורים פעילים לאותו סניף וסוג. לא נוצר דבר.';
+
 export const createLicense = async (req, res) => {
-  const { branchId, licenseTypeId, issueDate, expiryDate, deleteOldFile } = req.body;
+  const { branchId, licenseTypeId, issueDate, expiryDate, deleteOldFile, confirmRenewal, renewalOf } = req.body;
+  // Same fail-closed fence as the AI routes: without the live unique index, a concurrency race could
+  // create a second Active approval, a silent replace no one approved. The schema declaration is not
+  // evidence (autoIndex can be off); the live index list is read on every creation.
+  if (!(await activeUniqueIndexPresent())) return res.status(503).json({ message: MANUAL_NO_INDEX_MESSAGE });
   const branch = await Branch.findById(branchId);
   if (!hasBranchAccess(req.user, branch)) return res.status(branch ? 403 : 404).json({ message: 'אין גישה לסניף שנבחר' });
   if (branch.deleting) return res.status(409).json({ message: 'הסניף בתהליך מחיקה. נסו שוב בעוד רגע.' });
   const licenseType = await LicenseType.findOne({ _id: licenseTypeId, adminId: getAdminId(req.user), active: true, $or: [{ branchId: null }, { branchId }] });
   if (!licenseType) return res.status(400).json({ message: 'סוג האישור אינו זמין לסניף שנבחר' });
   if (new Date(expiryDate) < new Date(issueDate)) return res.status(400).json({ message: 'תאריך הפקיעה חייב להיות אחרי תאריך ההנפקה' });
+
+  // Renewal gate: an Active approval for this branch+type is replaced ONLY after the
+  // client explicitly confirms the renewal (confirmRenewal) of the exact record it
+  // reviewed (renewalOf, enforced when sent). Without the confirmation the request is
+  // refused BEFORE any upload or mutation, with the existing record's details so the
+  // client can present the choice. A silent replace is never possible.
+  const existing = await License.findOne({ branchId, licenseTypeId, lifecycle: 'Active' }).select('issueDate expiryDate fileName').lean();
+  const wantsRenewal = confirmRenewal === true || confirmRenewal === 'true';
+  if (existing && !wantsRenewal) return res.status(409).json(renewalRequiredBody(existing));
+  if (existing && renewalOf && String(existing._id) !== String(renewalOf)) {
+    return res.status(409).json({ code: 'renewal_conflict', message: 'האישור הקיים השתנה מאז שהוזנו הפרטים. רעננו ובדקו שוב לפני החידוש.' });
+  }
 
   let fileKey = '';
   if (req.file) {
@@ -41,11 +67,20 @@ export const createLicense = async (req, res) => {
       throw error;
     }
   }
-  const previous = await License.findOneAndUpdate(
-    { branchId, licenseTypeId, lifecycle: 'Active' },
-    { $set: { lifecycle: 'Replaced' } },
-    { new: false },
-  );
+  // The replace claim is pinned to the exact record the client confirmed. If it is
+  // no longer the Active one, a concurrent renewal won and this request refuses
+  // instead of replacing a record the user never reviewed.
+  const previous = existing
+    ? await License.findOneAndUpdate(
+      { _id: existing._id, lifecycle: 'Active' },
+      { $set: { lifecycle: 'Replaced' } },
+      { new: false },
+    )
+    : null;
+  if (existing && !previous) {
+    if (fileKey) await deleteFileFromS3(fileKey).catch(() => {});
+    return res.status(409).json({ code: 'renewal_conflict', message: 'האישור הקיים חודש או שונה בינתיים. רעננו ובדקו שוב לפני החידוש.' });
+  }
   let license;
   try {
     license = await License.create({ branchId, licenseTypeId, issueDate, expiryDate, fileUrl: fileKey, fileName: req.file?.originalname || '', status: statusForExpiry(expiryDate), createdBy: req.user._id });
@@ -53,7 +88,29 @@ export const createLicense = async (req, res) => {
     if (previous && !(await License.exists({ branchId, licenseTypeId, lifecycle: 'Active' }))) {
       await License.updateOne({ _id: previous._id, lifecycle: 'Replaced', replacedBy: null }, { $set: { lifecycle: 'Active' } });
     }
+    // The freshly uploaded document belongs to a creation that failed: drop
+    // it from storage instead of leaking an unreferenced object.
+    if (fileKey) await deleteFileFromS3(fileKey).catch(() => {});
+    // A second creation racing past the gate: the partial unique index picks the
+    // single Active winner. The loser converges to the same explicit-approval path
+    // as a sequential renewal, with the winner's details for the confirmation.
+    if (error && error.code === 11000) {
+      const now = await License.findOne({ branchId, licenseTypeId, lifecycle: 'Active' }).select('issueDate expiryDate fileName').lean();
+      return res.status(409).json(renewalRequiredBody(now));
+    }
     throw error;
+  }
+  // The type was verified active before the create; a deactivation landing in
+  // between must not leave a new approval on a type the admin just removed.
+  // Re-read and unwind deterministically: drop the new approval and restore
+  // the replaced one exactly like a creation failure.
+  if (!(await LicenseType.exists({ _id: licenseTypeId, active: true }))) {
+    await License.deleteOne({ _id: license._id });
+    if (previous && !(await License.exists({ branchId, licenseTypeId, lifecycle: 'Active' }))) {
+      await License.updateOne({ _id: previous._id, lifecycle: 'Replaced', replacedBy: null }, { $set: { lifecycle: 'Active' } });
+    }
+    if (fileKey) await deleteFileFromS3(fileKey).catch(() => {});
+    return res.status(409).json({ message: 'סוג האישור הושבת בינתיים. האישור לא נוצר.' });
   }
   if (previous) {
     await License.updateOne({ _id: previous._id }, { $set: { replacedBy: license._id } });
@@ -63,8 +120,15 @@ export const createLicense = async (req, res) => {
     // from the history view.
     if (previous.fileUrl && (deleteOldFile === true || deleteOldFile === 'true')) {
       try {
-        await deleteFileFromS3(previous.fileUrl);
-        await License.updateOne({ _id: previous._id }, { $set: { fileUrl: '', fileName: '' } });
+        // Reference first, storage after (the durable-intent order of
+        // deleteLicenseFile): a storage failure never leaves the history
+        // entry pointing at a deleted object - the intent is retried by
+        // reconcilePendingFileDeletions.
+        const cleared = await License.updateOne({ _id: previous._id, fileUrl: previous.fileUrl }, { $set: { fileUrl: '', fileName: '', pendingFileDeletion: previous.fileUrl } });
+        if (cleared.modifiedCount) {
+          await deleteFileFromS3(previous.fileUrl);
+          await License.updateOne({ _id: previous._id, pendingFileDeletion: previous.fileUrl }, { $set: { pendingFileDeletion: '' } });
+        }
       } catch (error) {
         // A storage cleanup failure must not roll back the renewal; the old
         // file simply stays available and can be deleted later.
@@ -82,17 +146,34 @@ export const deleteLicenseFile = async (req, res) => {
   const branch = license && await Branch.findById(license.branchId);
   if (!license || !hasBranchAccess(req.user, branch)) return res.status(404).json({ message: 'האישור לא נמצא' });
   if (!license.fileUrl) return res.status(404).json({ message: 'לא נמצא קובץ מצורף לאישור זה' });
+  // Conditional commit FIRST, pinned to the exact version and file we loaded
+  // (or the proposed version on the AI path): the reference is cleared and the
+  // durable deletion intent recorded in one atomic write. A concurrent renewal
+  // or second delete misses the filter instead of deleting a wrong/replaced
+  // file, and a later storage failure can never leave a dangling reference.
+  const cleared = await License.updateOne(
+    { _id: license._id, fileUrl: license.fileUrl, updatedAt: req.expectedUpdatedAt || license.updatedAt },
+    { $set: { fileUrl: '', fileName: '', pendingFileDeletion: license.fileUrl } },
+  );
+  if (!cleared.modifiedCount) {
+    const current = await License.findById(license._id).select('fileUrl');
+    if (current && !current.fileUrl) return res.status(404).json({ message: 'לא נמצא קובץ מצורף לאישור זה' });
+    const message = req.expectedUpdatedAt ? 'האישור השתנה מאז ההצעה. בקשו הצעה חדשה.' : 'האישור השתנה בינתיים. רעננו ונסו שוב.';
+    return res.status(409).json({ message });
+  }
+  // The approval no longer references the object; storage cleanup runs after
+  // the commit. A failure leaves the durable intent for the hourly
+  // reconcilePendingFileDeletions sweep instead of a broken download link -
+  // and the response must say so: reference removed is not storage erased.
+  let storagePending = false;
   try {
     await deleteFileFromS3(license.fileUrl);
+    await License.updateOne({ _id: license._id, pendingFileDeletion: license.fileUrl }, { $set: { pendingFileDeletion: '' } });
   } catch (error) {
-    error.statusCode = 502;
-    error.publicMessage = 'שירות האחסון אינו זמין כרגע. נסו שוב בעוד רגע.';
-    throw error;
+    storagePending = true;
+    console.error(`License file deletion pending storage retry for ${license.fileUrl}:`, error.message);
   }
-  license.fileUrl = '';
-  license.fileName = '';
-  await license.save();
-  res.json({ message: 'המסמך נמחק' });
+  res.json({ message: storagePending ? 'הקישור לקובץ הוסר. מחיקת הקובץ מהאחסון תושלם ברקע.' : 'המסמך נמחק', referenceRemoved: true, storagePending });
 };
 
 export const getLicenses = async (req, res) => {
@@ -165,8 +246,14 @@ export const deleteLicense = async (req, res) => {
   const license = await License.findById(req.params.id);
   const branch = license && await Branch.findById(license.branchId);
   if (!license || !hasBranchAccess(req.user, branch)) return res.status(404).json({ message: 'האישור לא נמצא' });
-  license.lifecycle = 'Replaced';
-  await license.save();
+  if (req.expectedUpdatedAt) {
+    // AI path: conditional at the database on the proposed version.
+    const r = await License.updateOne({ _id: license._id, lifecycle: 'Active', updatedAt: req.expectedUpdatedAt }, { $set: { lifecycle: 'Replaced' } });
+    if (!r.modifiedCount) return res.status(409).json({ message: 'האישור השתנה מאז ההצעה. בקשו הצעה חדשה.' });
+  } else {
+    license.lifecycle = 'Replaced';
+    await license.save();
+  }
   await Notification.updateMany({ licenseId: license._id, status: { $in: ['Open', 'In_Progress'] } }, { status: 'Resolved', resolvedAt: new Date(), resolvedBy: req.user._id });
   res.json({ message: 'האישור הועבר לארכיון' });
 };

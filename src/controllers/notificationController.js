@@ -47,12 +47,20 @@ export const listNotifications = async (req, res) => {
 
 export const updateNotification = async (req, res) => {
   const scope = { _id: req.params.id, adminId: getAdminId(req.user), ...(req.user.role === 'Manager' ? { branchId: { $in: req.user.accessibleBranches } } : {}) };
-  const notification = (await Notification.findOne(scope)) || (await RentReminder.findOne(scope));
+  // AI path: the proposal names the kind and version, so only that exact record is touched and only if unchanged.
+  const exp = req.expectedUpdatedAt;
+  const notification = req.expectedKind === 'Rent' ? await RentReminder.findOne(scope) : req.expectedKind === 'License' ? await Notification.findOne(scope) : ((await Notification.findOne(scope)) || (await RentReminder.findOne(scope)));
   if (!notification) return res.status(404).json({ message: 'ההתראה לא נמצאה' });
   if (!['In_Progress', 'Resolved', 'Dismissed', 'Open'].includes(req.body.status)) return res.status(400).json({ message: 'מצב טיפול לא תקין' });
   notification.status = req.body.status;
   notification.resolvedAt = ['Resolved', 'Dismissed'].includes(req.body.status) ? new Date() : null;
   notification.resolvedBy = notification.resolvedAt ? req.user._id : null;
+  if (exp) {
+    const Model = notification.constructor;
+    const r = await Model.updateOne({ _id: notification._id, updatedAt: exp }, { $set: { status: notification.status, resolvedAt: notification.resolvedAt, resolvedBy: notification.resolvedBy } });
+    if (!r.modifiedCount) return res.status(409).json({ message: 'ההתראה השתנתה מאז ההצעה. בקשו הצעה חדשה.' });
+    return res.json(notification);
+  }
   await notification.save();
   res.json(notification);
 };

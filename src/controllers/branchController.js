@@ -1,3 +1,4 @@
+import { countBranchDependents, SNAPSHOT_KEYS } from '../utils/branchDependents.js';
 import Branch from '../models/Branch.js';
 import License from '../models/License.js';
 import Notification from '../models/Notification.js';
@@ -35,7 +36,7 @@ const branchFields = async (body, adminId) => {
     if (!body.authorityId) {
       fields.authorityId = null;
     } else {
-      const owned = await Authority.exists({ _id: body.authorityId, adminId });
+      const owned = await Authority.exists({ _id: body.authorityId, adminId, deleting: { $ne: true } });
       if (!owned) throw Object.assign(new Error('גוף התשלום לא נמצא'), { status: 400 });
       fields.authorityId = body.authorityId;
     }
@@ -43,18 +44,71 @@ const branchFields = async (body, adminId) => {
   return fields;
 };
 
+// Post-write verify (no cross-collection transaction on standalone): a payer
+// deleted between the pre-check in branchFields and this write must not leave
+// a dangling link - unwind and refuse. deleteAuthority cleans links under its
+// claim, so every interleaving converges.
+const verifyPayerAlive = async (fields, adminId) => !fields.authorityId || Authority.exists({ _id: fields.authorityId, adminId, deleting: { $ne: true } });
+
 export const createBranch = async (req, res) => {
   const adminId = getAdminId(req.user);
-  const branch = await Branch.create({ adminId, ...await branchFields(req.body, adminId) });
+  const fields = await branchFields(req.body, adminId);
+  const branch = await Branch.create({ adminId, ...fields });
+  if (!(await verifyPayerAlive(fields, adminId))) {
+    // Never a destructive unwind: a dependent created in the verify window
+    // does not bump the branch's version, so no delete condition can be
+    // race-free. The branch stays; only the dead link is removed, and only
+    // if it still holds the exact value this attempt wrote (a later edit
+    // wins). The result is truthful: created, link failed - not a generic
+    // "nothing happened" error.
+    await Branch.updateOne({ _id: branch._id, authorityId: fields.authorityId }, { $set: { authorityId: null } });
+    // Re-read: a concurrent edit may have changed the link after our unlink.
+    const fresh = await Branch.findById(branch._id).lean();
+    return res.status(201).json({ ...fresh, payerLinkFailed: true, message: 'הסניף נוצר, אך גוף התשלום השתנה או נמחק. קשרו אותו מחדש.' });
+  }
   res.status(201).json(branch);
 };
 
 export const updateBranch = async (req, res) => {
   const adminId = getAdminId(req.user);
+  // Optional precondition (set by the AI confirm path): the write is conditional at the database, so a value
+  // changed after the proposal makes this a no-match (409) instead of silently overwriting it.
+  if (req.expectedBefore) {
+    const fields = await branchFields(req.body, adminId);
+    const filter = { _id: req.params.id, adminId };
+    for (const [k, v] of Object.entries(req.expectedBefore)) filter[k] = v === '' || v == null ? (k === 'authorityId' ? null : { $in: [null, ''] }) : v;
+    const updated = await Branch.findOneAndUpdate(filter, { $set: fields }, { new: true, runValidators: true });
+    if (!updated) {
+      const exists = await Branch.exists({ _id: req.params.id, adminId });
+      return res.status(exists ? 409 : 404).json({ message: exists ? 'הסניף השתנה מאז ההצעה. בקשו הצעה חדשה.' : 'הסניף לא נמצא' });
+    }
+    if (!(await verifyPayerAlive(fields, adminId))) {
+      // Restore the pinned previous link ('' means it was unlinked) - but
+      // only over the exact value THIS attempt wrote: a later legitimate
+      // edit to the link wins and is never overwritten. Value-conditioning
+      // is sound here without a write version: the conditioned value is a
+      // dead payer id, and branchFields refuses linking to a missing or
+      // deleting payer, so no concurrent legitimate write can recreate it
+      // (no ABA on a refused value).
+      const prev = req.expectedBefore.authorityId === '' || req.expectedBefore.authorityId == null ? null : req.expectedBefore.authorityId;
+      await Branch.updateOne({ _id: updated._id, authorityId: fields.authorityId }, { $set: { authorityId: prev } });
+      return res.status(409).json({ message: 'גוף התשלום השתנה או נמחק. נסו שוב.' });
+    }
+    return res.json(updated);
+  }
   const branch = await Branch.findOne({ _id: req.params.id, adminId });
   if (!branch) return res.status(404).json({ message: 'הסניף לא נמצא' });
-  Object.assign(branch, await branchFields(req.body, adminId));
+  const prevAuthorityId = branch.authorityId ?? null;
+  const fields = await branchFields(req.body, adminId);
+  Object.assign(branch, fields);
   await branch.save();
+  if (!(await verifyPayerAlive(fields, adminId))) {
+    // Conditional restore: only over the exact value this attempt wrote.
+    // Sound without a write version: the dead payer id cannot be recreated
+    // by a concurrent legitimate write (branchFields refuses it), so no ABA.
+    await Branch.updateOne({ _id: branch._id, authorityId: fields.authorityId }, { $set: { authorityId: prevAuthorityId } });
+    return res.status(409).json({ message: 'גוף התשלום השתנה או נמחק. נסו שוב.' });
+  }
   res.json(branch);
 };
 
@@ -63,12 +117,13 @@ export const deleteBranch = async (req, res) => {
   // Atomically claim the branch for deletion so two deletes cannot interleave
   // and so new permits cannot be added once the cascade starts.
   const branch = await Branch.findOneAndUpdate(
-    { _id: req.params.id, adminId, deleting: { $ne: true } },
+    { _id: req.params.id, adminId, deleting: { $ne: true }, ...(req.expectedBranch ? { name: req.expectedBranch.name, updatedAt: req.expectedBranch.updatedAt } : {}) },
     { $set: { deleting: true } },
     { new: true },
   );
   if (!branch) {
     const exists = await Branch.exists({ _id: req.params.id, adminId });
+    if (exists && req.expectedBranch && !(await Branch.exists({ _id: req.params.id, adminId, deleting: true }))) return res.status(409).json({ message: 'פרטי הסניף השתנו מאז ההצעה. לא נמחק דבר. בקשו הצעה חדשה.' });
     return res.status(exists ? 409 : 404).json({ message: exists ? 'מחיקת הסניף כבר מתבצעת. נסו שוב בעוד רגע.' : 'הסניף לא נמצא' });
   }
 
@@ -92,6 +147,17 @@ export const deleteBranch = async (req, res) => {
     await releaseGuard();
     await dropOperation();
     return res.status(409).json({ message: `לסניף יש ${activeAgreements} הסכמי שכירות פעילים. סגרו את ההסכמים במסך השכירות לפני מחיקת הסניף - היסטוריית התשלומים נשמרת.` });
+  }
+
+  // AI path: the approval is bound to the dependents the user saw. Counted here, after the claim, because from this
+  // point no new permit or agreement can start for this branch. Any drift aborts before anything is deleted.
+  if (req.expectedDependents) {
+    const live = await countBranchDependents(branch._id);
+    if (SNAPSHOT_KEYS.some((k) => Number(req.expectedDependents[k]) !== live[k])) {
+      await releaseGuard();
+      await dropOperation();
+      return res.status(409).json({ message: 'אישורים, קבצים או התראות של הסניף השתנו מאז ההצעה. לא נמחק דבר. בקשו הצעה חדשה.' });
+    }
   }
 
   // Confirmed cascade: the branch's permits (with history), attached documents
@@ -151,5 +217,5 @@ export const deleteBranch = async (req, res) => {
   // upload that was already in flight when the guard landed can still insert
   // after this request ends, and the scheduled reconciliation only ever reaps
   // leftovers of recorded operations. Dropping it now could orphan such a write.
-  res.json({ ok: true, deletedLicenses });
+  res.json({ ok: true, deletedLicenses, pendingCleanup: sweepPending });
 };

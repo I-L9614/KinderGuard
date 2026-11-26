@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import path from 'path';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
@@ -50,6 +50,60 @@ beforeEach(() => { s3Mock.reset(); s3Mock.on(PutObjectCommand).resolves({}); s3M
 const deleteCalls = () => s3Mock.calls().filter((call) => call.args[0] instanceof DeleteObjectCommand);
 
 describe('License document management', () => {
+  it('refuses an unconfirmed renewal before any upload reaches storage', async () => {
+    const licenseTypeId = await freshLicenseType();
+    const oldLicense = await License.create({
+      branchId, licenseTypeId, issueDate: today(), expiryDate: today(),
+      fileUrl: 'licenses/000-old.pdf', fileName: 'old.pdf', status: 'Valid', createdBy: adminId,
+    });
+    const future = new Date(); future.setDate(future.getDate() + 365);
+    const res = await request(app)
+      .post('/api/licenses').set(auth())
+      .field('branchId', branchId).field('licenseTypeId', licenseTypeId)
+      .field('issueDate', today()).field('expiryDate', future.toISOString().slice(0, 10))
+      .attach('file', fakePdf(), { filename: 'new.pdf', contentType: 'application/pdf' })
+      .expect(409);
+    expect(res.body.code).toBe('renewal_required');
+    expect(res.body.existing.id).toBe(String(oldLicense._id));
+    // No storage write, no mutation: the refusal happens before the upload.
+    expect(s3Mock.calls().filter((call) => call.args[0] instanceof PutObjectCommand)).toHaveLength(0);
+    expect(await License.findById(oldLicense._id)).toMatchObject({ lifecycle: 'Active' });
+  }, 20000);
+
+  it('a creation failure after the replace claim restores the previous approval and drops the orphaned upload', async () => {
+    const licenseTypeId = await freshLicenseType();
+    const oldLicense = await License.create({
+      branchId, licenseTypeId, issueDate: today(), expiryDate: today(),
+      fileUrl: 'licenses/555-old.pdf', fileName: 'old.pdf', status: 'Valid', createdBy: adminId,
+    });
+    const future = new Date(); future.setDate(future.getDate() + 365);
+    const spy = vi.spyOn(License, 'create').mockRejectedValueOnce(new Error('db down'));
+    const res = await request(app)
+      .post('/api/licenses').set(auth())
+      .field('branchId', branchId).field('licenseTypeId', licenseTypeId)
+      .field('issueDate', today()).field('expiryDate', future.toISOString().slice(0, 10))
+      .field('confirmRenewal', 'true').field('renewalOf', String(oldLicense._id))
+      .attach('file', fakePdf(), { filename: 'new.pdf', contentType: 'application/pdf' });
+    spy.mockRestore();
+    expect(res.status).toBe(500);
+    // Recoverable: the previous approval is Active again with its file reference intact,
+    // and the uploaded document of the failed creation was dropped from storage.
+    const after = await License.findById(oldLicense._id);
+    expect(after.lifecycle).toBe('Active');
+    expect(after.fileUrl).toBe('licenses/555-old.pdf');
+    const dels = deleteCalls().map((call) => call.args[0].input.Key);
+    expect(dels).toHaveLength(1);
+    expect(dels[0]).not.toBe('licenses/555-old.pdf');
+    expect(await License.countDocuments({ branchId, licenseTypeId })).toBe(1);
+    // The pair is renewable again at once: the fence left no stuck state.
+    await request(app)
+      .post('/api/licenses').set(auth())
+      .field('branchId', branchId).field('licenseTypeId', licenseTypeId)
+      .field('issueDate', today()).field('expiryDate', future.toISOString().slice(0, 10))
+      .field('confirmRenewal', 'true').field('renewalOf', String(oldLicense._id))
+      .expect(201);
+  }, 20000);
+
   it('keeps the replaced approval file on renewal unless deleteOldFile is set', async () => {
     const licenseTypeId = await freshLicenseType();
     const oldLicense = await License.create({
@@ -61,6 +115,7 @@ describe('License document management', () => {
       .post('/api/licenses').set(auth())
       .field('branchId', branchId).field('licenseTypeId', licenseTypeId)
       .field('issueDate', today()).field('expiryDate', future.toISOString().slice(0, 10))
+      .field('confirmRenewal', 'true').field('renewalOf', String(oldLicense._id))
       .expect(201);
     const oldAfter = await License.findById(oldLicense._id);
     expect(oldAfter.lifecycle).toBe('Replaced');
@@ -79,6 +134,7 @@ describe('License document management', () => {
       .post('/api/licenses').set(auth())
       .field('branchId', branchId).field('licenseTypeId', licenseTypeId)
       .field('issueDate', today()).field('expiryDate', future.toISOString().slice(0, 10))
+      .field('confirmRenewal', 'true').field('renewalOf', String(oldLicense._id))
       .field('deleteOldFile', 'true')
       .expect(201);
     const oldAfter = await License.findById(oldLicense._id);
@@ -125,7 +181,7 @@ describe('Rent agreement documents', () => {
       .post(`/api/rent/agreements/${agreementId}/documents`).set(auth())
       .attach('file', fakePdf(), { filename: 'contract.pdf', contentType: 'application/pdf' })
       .expect(201);
-    expect(upload.body.key).toMatch(/^rent\/\d+-contract\.pdf$/);
+    expect(upload.body.key).toMatch(/^rent\/\d+-[0-9a-f-]{36}-contract\.pdf$/);
     expect(upload.body.fileName).toBe('contract.pdf');
 
     s3Mock.on(GetObjectCommand).resolves({
@@ -232,4 +288,24 @@ describe('Document permission isolation', () => {
       .delete(`/api/rent/agreements/${agreementId}/documents/${new mongoose.Types.ObjectId()}`).set(managerAuth()).expect(403);
     expect(s3Mock.calls().filter((call) => call.args[0] instanceof PutObjectCommand)).toHaveLength(0);
   }, 20000);
+});
+
+// A Pending_Setup row (uncommitted guarded create) must not be addressable
+// through the AI document routes either: the delete-propose read fences it
+// exactly like the direct controllers do.
+describe('AI agreement-document delete-propose fence', () => {
+  it('refuses a Pending_Setup agreement with 404 while an Active one still proposes', async () => {
+    await mongoose.model('User').updateOne({ _id: adminId }, { aiEnabled: true });
+    const Authority = mongoose.model('Authority');
+    const au = await Authority.create({ adminId, name: `רשות גדר ${Date.now()}`, ...(Authority.schema.path('type') ? { type: 'council' } : {}) });
+    const base = { adminId, branchId, authorityId: au._id, direction: 'outgoing', monthlyAmount: 1000, frequency: 'monthly', paymentMethod: 'transfer', firstDueDate: new Date('2027-01-01') };
+    const pending = await RentAgreement.create({ ...base, status: 'Pending_Setup', pendingGuard: true });
+    const active = await RentAgreement.create({ ...base });
+    active.documents.push({ key: 'rent/fence.pdf', fileName: 'fence.pdf', uploadedAt: new Date() });
+    await active.save();
+    const docId = String(active.documents[0]._id);
+    await request(app).post('/api/ai/agreements/document/delete-propose').set(auth()).send({ agreementId: String(pending._id), docId }).expect(404);
+    await request(app).post('/api/ai/agreements/document/delete-propose').set(auth()).send({ agreementId: String(active._id), docId }).expect(200);
+    await mongoose.model('User').updateOne({ _id: adminId }, { aiEnabled: false });
+  });
 });

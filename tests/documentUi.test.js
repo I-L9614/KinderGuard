@@ -30,7 +30,7 @@ const rentSummary = {
 let fetchCalls;
 const stub = (url) => {
   const p = String(url).split('?')[0];
-  if (p === '/api/auth/refresh') return { token: 'stub' };
+  if (p === '/api/auth/refresh') return { token: `h.${btoa(JSON.stringify({ id: 'u1' })).replace(/=+$/, '')}.s` };
   if (p === '/api/users/me') return { _id: 'u1', name: 'בודק', role: 'Admin' };
   if (p === '/api/branches') return branches;
   if (p === '/api/licenses') return licenses;

@@ -9,6 +9,9 @@ const taskSchema = new mongoose.Schema({
   dueDate: { type: Date, default: null },
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null },
   completedAt: { type: Date, default: null },
+  // set only when created from a confirmed AI proposal; the unique index makes that create idempotent
+  aiProposalId: { type: mongoose.Schema.Types.ObjectId, default: undefined },
 }, { timestamps: true });
+taskSchema.index({ aiProposalId: 1 }, { unique: true, partialFilterExpression: { aiProposalId: { $type: 'objectId' } } });
 
 export default mongoose.model('Task', taskSchema);

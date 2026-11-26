@@ -1,3 +1,4 @@
+import { normName } from '../utils/normName.js';
 import Authority from '../models/Authority.js';
 import RentAgreement from '../models/RentAgreement.js';
 import RentPayment from '../models/RentPayment.js';
@@ -38,7 +39,18 @@ const validDate = (value) => value && !Number.isNaN(new Date(value).getTime());
 // figure (default monthly x 3), annual pays the stored yearly figure, monthly
 // and custom pay the monthly amount. Null when the agreement has no amount
 // that fits its frequency yet.
-const periodAmount = (agreement) => (agreement.frequency === 'quarterly'
+
+// Atomic stale-write guard: an AI proposal (or any caller) may pin the
+// agreement version it was based on. The load itself is conditional on it, and
+// the schema's optimistic concurrency makes save() fail if anything wrote in
+// between, so neither a manual edit nor a second confirm can be overwritten.
+const loadAgreement = (req, adminId) => RentAgreement.findOne({
+  _id: req.params.id, adminId, status: { $ne: 'Pending_Setup' }, ...(req.expectedUpdatedAt ? { updatedAt: req.expectedUpdatedAt } : {}),
+});
+const staleAgreement = (res) => res.status(409).json({ message: 'ההסכם השתנה מאז ההצעה. בקשו הצעה חדשה.' });
+const isVersionError = (e) => e && (e.name === 'VersionError' || e.name === 'DocumentNotFoundError');
+
+export const periodAmount = (agreement) => (agreement.frequency === 'quarterly'
   ? (agreement.quarterlyAmount ?? (agreement.monthlyAmount != null ? agreement.monthlyAmount * 3 : (agreement.annualAmount != null ? agreement.annualAmount / 4 : null)))
   : agreement.frequency === 'annual' ? agreement.annualAmount
     : agreement.monthlyAmount);
@@ -81,23 +93,32 @@ export const scheduleRentPayments = async (agreement) => {
   const authority = await Authority.findById(agreement.authorityId).select('name');
   let created = 0;
   for (const dueDate of dates) {
-    const result = await RentPayment.updateOne(
-      { agreementId: agreement._id, dueDate },
-      {
-        $setOnInsert: {
-          adminId: agreement.adminId,
-          branchId: agreement.branchId,
-          authorityId: agreement.authorityId,
-          branchName: branch?.name || '',
-          authorityName: authority?.name || '',
-          dueDate,
-          amount,
-          method: agreement.paymentMethod,
-          status: 'Pending',
+    // A concurrent scheduler (hourly materialization or another request) can
+    // insert the same {agreementId, dueDate} row first: the unique index then
+    // rejects this upsert with 11000, which only means the row already exists.
+    let result;
+    try {
+      result = await RentPayment.updateOne(
+        { agreementId: agreement._id, dueDate },
+        {
+          $setOnInsert: {
+            adminId: agreement.adminId,
+            branchId: agreement.branchId,
+            authorityId: agreement.authorityId,
+            branchName: branch?.name || '',
+            authorityName: authority?.name || '',
+            dueDate,
+            amount,
+            method: agreement.paymentMethod,
+            status: 'Pending',
+          },
         },
-      },
-      { upsert: true },
-    );
+        { upsert: true },
+      );
+    } catch (error) {
+      if (error?.code === 11000) continue;
+      throw error;
+    }
     if (result.upsertedCount) created += 1;
   }
   return created;
@@ -189,19 +210,74 @@ export const createAuthority = async (req, res) => {
   const name = String(req.body.name || '').trim();
   if (!name) return res.status(400).json({ message: 'יש להזין שם רשות' });
   const type = req.body.type === 'private' ? 'private' : 'council';
-  const authority = await Authority.create({ adminId: getAdminId(req.user), name, type });
+  const nameKey = normName(name);
+  const adminId = getAdminId(req.user);
+  // Read check first (covers legacy records without nameKey, which the
+  // partial index cannot see). While the approved migration has not built the
+  // unique index, a concurrent create can still slip past this check, so the
+  // post-create reconciliation below decides deterministically: with N
+  // concurrent creators the smallest id always survives and every later one
+  // removes itself. Exactly one authority with a normalized name remains no
+  // matter how creations interleave, with or without the index.
+  const before = await Authority.find({ adminId }).select('name').lean();
+  if (before.some((x) => normName(x.name) === nameKey)) return res.status(409).json({ message: 'כבר קיים גוף בשם הזה' });
+  let authority;
+  try { authority = await Authority.create({ adminId, name, type, nameKey }); } catch (e) { if (e?.code === 11000) return res.status(409).json({ message: 'כבר קיים גוף בשם הזה' }); throw e; }
+  const after = await Authority.find({ adminId }).select('name').lean();
+  if (after.some((x) => normName(x.name) === nameKey && String(x._id) < String(authority._id))) {
+    await Authority.deleteOne({ _id: authority._id });
+    return res.status(409).json({ message: 'כבר קיים גוף בשם הזה' });
+  }
   res.status(201).json(authority);
 };
 
 export const deleteAuthority = async (req, res) => {
   const adminId = getAdminId(req.user);
-  const authority = await Authority.findOne({ _id: req.params.id, adminId });
-  if (!authority) return res.status(404).json({ message: 'הרשות לא נמצאה' });
-  const active = await RentAgreement.countDocuments({ authorityId: authority._id, status: 'Active' });
-  if (active > 0) return res.status(409).json({ message: `לרשות יש ${active} הסכמי שכירות פעילים. סגרו אותם לפני מחיקת הרשות.` });
+  // Atomically claim the authority for deletion (same guard pattern as
+  // branches): two deletes cannot interleave, and agreement creation refuses
+  // or unwinds against the flag. The AI version pin joins the claim filter,
+  // so a stale proposal can never delete. No delete-then-restore: a crash
+  // between those two would lose the authority with its history.
+  const claim = await Authority.findOneAndUpdate(
+    { _id: req.params.id, adminId, deleting: { $ne: true }, ...(req.expectedUpdatedAt ? { updatedAt: req.expectedUpdatedAt } : {}) },
+    { $set: { deleting: true } },
+    { new: true },
+  );
+  if (!claim) {
+    const exists = await Authority.exists({ _id: req.params.id, adminId });
+    if (!exists) return res.status(404).json({ message: 'הרשות לא נמצאה' });
+    if (req.expectedUpdatedAt) return res.status(409).json({ message: 'הגוף השתנה מאז ההצעה. בקשו הצעה חדשה.' });
+    return res.status(409).json({ message: 'מחיקת הרשות כבר מתבצעת. נסו שוב בעוד רגע.' });
+  }
+  const releaseGuard = () => Authority.updateOne({ _id: claim._id }, { $set: { deleting: false } });
+  // Checked after the guard is claimed: agreement creation validates against
+  // the flag and unwinds any insert that raced it, so no active agreement can
+  // slip in after this count.
+  const active = await RentAgreement.countDocuments({ authorityId: claim._id, status: 'Active' });
+  if (active > 0) {
+    await releaseGuard();
+    return res.status(409).json({ message: `לרשות יש ${active} הסכמי שכירות פעילים. סגרו אותם לפני מחיקת הרשות.` });
+  }
+  // Unlink live branches while the claim holds: a deleted payer must not
+  // leave a dangling reference. A bind racing in after this cleanup is
+  // refused by the deleting filter in branchFields or unwound by the
+  // post-write verify in createBranch/updateBranch. A crash after the unlink
+  // leaves the authority claimed-but-alive with truthful null links;
+  // reconcileAuthorityDeleteGuards releases the stale claim so the authority
+  // is usable or deletable again - no step here needs a compensating write.
+  await Branch.updateMany({ adminId, authorityId: claim._id }, { $set: { authorityId: null } });
   // Closed agreements and payment history keep their denormalized names.
-  await authority.deleteOne();
+  await Authority.deleteOne({ _id: claim._id, deleting: true });
   res.json({ ok: true });
+};
+
+// Durable recovery for a delete that crashed after claiming the guard: the
+// authority would otherwise stay 'deleting' forever, refusing agreements and
+// deletes. Guards older than ten minutes are residue (a delete takes
+// seconds); release them so the authority is usable or deletable again.
+export const reconcileAuthorityDeleteGuards = async () => {
+  const staleBefore = new Date(Date.now() - 10 * 60 * 1000);
+  await Authority.updateMany({ deleting: true, updatedAt: { $lt: staleBefore } }, { $set: { deleting: false } });
 };
 
 const validateAgreementInput = async (req, res) => {
@@ -243,6 +319,7 @@ const validateAgreementInput = async (req, res) => {
   if (branch.deleting) { res.status(409).json({ message: 'הסניף בתהליך מחיקה - לא ניתן להוסיף הסכם שכירות' }); return null; }
   const authority = await Authority.findOne({ _id: authorityId, adminId });
   if (!authority) { res.status(404).json({ message: 'הרשות לא נמצאה' }); return null; }
+  if (authority.deleting) { res.status(409).json({ message: 'הרשות בתהליך מחיקה - לא ניתן להוסיף הסכם שכירות' }); return null; }
   let customDueDates = [];
   if (frequency === 'custom') {
     if (monthly == null) { res.status(400).json({ message: 'בתדירות מותאמת יש להזין סכום חודשי' }); return null; }
@@ -270,6 +347,8 @@ export const createAgreement = async (req, res) => {
     adminId: input.adminId,
     branchId: input.branch._id,
     authorityId: input.authority._id,
+    branchName: input.branch.name || '',
+    authorityName: input.authority.name || '',
     direction: input.direction,
     monthlyAmount: input.monthly,
     quarterlyAmount: input.quarterly,
@@ -279,22 +358,109 @@ export const createAgreement = async (req, res) => {
     customDueDates: input.customDueDates,
     paymentMethod: input.paymentMethod,
     chequeSeries: input.chequeSeries,
+    // A guarded (AI-path) create starts invisible: Pending_Setup + pendingGuard.
+    // Every consumer that filters status:'Active' ignores it, and it has no
+    // payments while pending, so nothing can act on it as a real agreement
+    // before the commit below. The plain UI path is unchanged (Active at once).
+    ...(req.rejectActiveDuplicate ? { status: 'Pending_Setup', pendingGuard: true } : {}),
   });
+  // AI-path duplicate-Active guard (opt-in via req.rejectActiveDuplicate; the
+  // plain UI keeps its existing contract and may hold several Active
+  // agreements per branch+authority). There is deliberately no unique index
+  // for this invariant - creating one would be a live migration - so the
+  // insert itself is the claim. Any OTHER Active or still-pending agreement
+  // for the same branch+authority, created before or concurrently, means this
+  // insert loses: unwind it and refuse. If two racers both see each other,
+  // both unwind (fail-closed; a retry then succeeds), so at most one Active
+  // agreement per branch+authority ever survives on this path.
+  if (req.rejectActiveDuplicate) {
+    const duplicate = await RentAgreement.exists({ adminId: input.adminId, branchId: input.branch._id, authorityId: input.authority._id, status: { $in: ['Active', 'Pending_Setup'] }, _id: { $ne: agreement._id } });
+    if (duplicate) {
+      // If this delete fails, the loser keeps its pendingGuard flag and the
+      // reconcile removes it - no duplicate is left without a recovery path.
+      await RentAgreement.deleteOne({ _id: agreement._id });
+      return res.status(409).json({ message: 'כבר קיים הסכם פעיל לסניף הזה מול גוף התשלום. ההסכם לא נוצר.' });
+    }
+  }
+  // Close the delete race deterministically: the authority may have been
+  // claimed for deletion (or deleted) between validation and this insert. If
+  // so, the new agreement must not survive pointing at a gone authority -
+  // unwind it and refuse. Together with the deleting-flag check above, every
+  // interleaving ends consistent: either the delete sees the agreement and
+  // refuses, or the agreement unwinds itself. No dangling reference is ever
+  // left, before or after the delete's own checks.
+  const authorityAlive = await Authority.exists({ _id: input.authority._id, deleting: { $ne: true } });
+  if (!authorityAlive) {
+    await RentAgreement.deleteOne({ _id: agreement._id });
+    return res.status(409).json({ message: 'הרשות נמחקה בינתיים. ההסכם לא נוצר.' });
+  }
+  if (req.rejectActiveDuplicate) {
+    // Commit point of the guarded create: checks passed. Only now does the
+    // row become a real (Active) agreement - one atomic conditional write,
+    // still gated on the flag so a swept row can never resurrect. Anything
+    // after this is convergent: a crash before or during scheduling is
+    // completed by the startup/hourly scheduleAllRentPayments (idempotent
+    // upserts) and generateDueRentReminders, exactly as for any Active row.
+    const committed = await RentAgreement.updateOne({ _id: agreement._id, pendingGuard: true }, { $set: { status: 'Active' }, $unset: { pendingGuard: 1 } });
+    if (!committed.modifiedCount) throw Object.assign(new Error('ההסכם לא נוצר. נסו שוב.'), { statusCode: 500 });
+    agreement.set({ status: 'Active', pendingGuard: undefined });
+  }
   await scheduleRentPayments(agreement);
   await generateDueRentReminders();
   res.status(201).json(agreement);
 };
 
+// Recovery for guarded (AI-path) creates: a row still flagged pendingGuard
+// is stuck in Pending_Setup - its create never returned success (the commit
+// above flips Active rows and clears the flag first), it has no payments in
+// the normal flow, and consumers filtering status:'Active' never see it.
+// Deleting it (plus any children, defensively) is always truthful and lets a
+// retry start clean. Only stale rows are touched: a live create finishes in
+// milliseconds, well under the age threshold. Plain-UI agreements never carry
+// the flag, so intentionally multi-agreement pairs are never swept.
+export const reconcileGuardedAgreementCreates = async () => {
+  const staleBefore = new Date(Date.now() - 10 * 60 * 1000);
+  // Every Pending_Setup row is a guarded create, and an aged one is a dead
+  // create. Rows claimed by an earlier pass that crashed mid-cleanup are
+  // included so the next pass resumes them.
+  const stale = await RentAgreement.find({ status: 'Pending_Setup', createdAt: { $lt: staleBefore } }).select('_id sweepClaim').lean();
+  let swept = 0;
+  for (const s of stale) {
+    if (!s.sweepClaim) {
+      // Conditional claim: unsetting pendingGuard atomically fences out a
+      // writer resuming after the age threshold - its commit requires
+      // pendingGuard:true and now matches nothing, so it fails closed instead
+      // of activating a row whose children are being deleted. If the commit
+      // landed first, matchedCount is 0 and the row is Active: hands off.
+      const claim = await RentAgreement.updateOne({ _id: s._id, pendingGuard: true }, { $set: { sweepClaim: true }, $unset: { pendingGuard: 1 } });
+      if (claim.matchedCount === 0) continue;
+    }
+    // Agreement LAST: a crash here leaves orphaned children for the next
+    // pass, never an agreement whose payments silently vanished.
+    await RentReminder.deleteMany({ rentAgreementId: s._id });
+    await RentPayment.deleteMany({ agreementId: s._id });
+    const del = await RentAgreement.deleteOne({ _id: s._id, status: 'Pending_Setup' });
+    if (del.deletedCount) swept += 1;
+  }
+  return swept;
+};
+
 // --- Rent agreement documents (kept separate from license documents) ---
 
 const findAgreement = async (req) => {
-  const agreement = await RentAgreement.findOne({ _id: req.params.id, adminId: getAdminId(req.user) });
+  // Pending_Setup rows are uncommitted guarded creates: not addressable by id
+  // on any direct route (documents, update, close) - they answer 404 like any
+  // row that does not exist for this admin.
+  const agreement = await RentAgreement.findOne({ _id: req.params.id, adminId: getAdminId(req.user), status: { $ne: 'Pending_Setup' }, ...(req.expectedUpdatedAt ? { updatedAt: req.expectedUpdatedAt } : {}) });
   return agreement;
 };
 
 export const uploadAgreementDocument = async (req, res) => {
   const agreement = await findAgreement(req);
-  if (!agreement) return res.status(404).json({ message: 'הסכם השכירות לא נמצא' });
+  if (!agreement) {
+    if (req.expectedUpdatedAt && await RentAgreement.exists({ _id: req.params.id, adminId: getAdminId(req.user), status: { $ne: 'Pending_Setup' } })) return staleAgreement(res);
+    return res.status(404).json({ message: 'הסכם השכירות לא נמצא' });
+  }
   if (!req.file) return res.status(400).json({ message: 'לא נבחר קובץ להעלאה' });
   // The declared mimetype passed the route whitelist; now prove the bytes
   // match it, so a renamed script can't ride into storage as a "document".
@@ -313,7 +479,10 @@ export const uploadAgreementDocument = async (req, res) => {
     throw error;
   }
   agreement.documents.push({ key, fileName: req.file.originalname || '', uploadedAt: new Date(), uploadedBy: req.user._id });
-  await agreement.save();
+  // A concurrent write since the load must reject this save, not crash it:
+  // the version guard maps to 409 so the client can reload and retry. The
+  // already-uploaded S3 object stays orphaned, never a dangling DB reference.
+  try { await agreement.save(); } catch (e) { if (isVersionError(e)) return staleAgreement(res); throw e; }
   res.status(201).json(agreement.documents[agreement.documents.length - 1]);
 };
 
@@ -355,22 +524,28 @@ export const deleteAgreementDocument = async (req, res) => {
   if (!agreement) return res.status(404).json({ message: 'הסכם השכירות לא נמצא' });
   const doc = agreement.documents.id(req.params.docId);
   if (!doc) return res.status(404).json({ message: 'המסמך לא נמצא' });
+  // Commit the reference removal first: the version-guarded save is the
+  // atomic commit, so a concurrent write yields 409 with the file and its
+  // reference both intact. The S3 object is deleted only afterwards; an S3
+  // failure there leaves an orphan file (storage cost), never a dangling
+  // reference to an already-deleted object.
+  doc.deleteOne();
+  try { await agreement.save(); } catch (e) { if (isVersionError(e)) return staleAgreement(res); throw e; }
   try {
     await deleteFileFromS3(doc.key);
   } catch (error) {
-    error.statusCode = 502;
-    error.publicMessage = 'שירות האחסון אינו זמין כרגע. נסו שוב בעוד רגע.';
-    throw error;
+    console.warn('rent document removed from agreement but S3 delete failed:', doc.key, error?.message || error);
   }
-  doc.deleteOne();
-  await agreement.save();
   res.json({ message: 'המסמך נמחק' });
 };
 
 export const updateAgreement = async (req, res) => {
   const adminId = getAdminId(req.user);
-  const agreement = await RentAgreement.findOne({ _id: req.params.id, adminId });
-  if (!agreement) return res.status(404).json({ message: 'הסכם השכירות לא נמצא' });
+  const agreement = await loadAgreement(req, adminId);
+  if (!agreement) {
+    if (req.expectedUpdatedAt && await RentAgreement.exists({ _id: req.params.id, adminId, status: { $ne: 'Pending_Setup' } })) return staleAgreement(res);
+    return res.status(404).json({ message: 'הסכם השכירות לא נמצא' });
+  }
   const frequencyBefore = agreement.frequency;
   const firstDueBefore = agreement.firstDueDate ? dayStart(agreement.firstDueDate).getTime() : null;
   const body = { ...req.body };
@@ -431,7 +606,7 @@ export const updateAgreement = async (req, res) => {
   const amountsChanged = body.monthlyAmount !== undefined || body.annualAmount !== undefined || body.quarterlyAmount !== undefined;
   const scheduleChanged = agreement.frequency !== frequencyBefore
     || (agreement.firstDueDate ? agreement.firstDueDate.getTime() : null) !== firstDueBefore;
-  await agreement.save();
+  try { await agreement.save(); } catch (e) { if (isVersionError(e)) return staleAgreement(res); throw e; }
   // Reconcile before materializing so removed dates do not block the new
   // schedule's unique {agreementId, dueDate} rows.
   if (scheduleChanged) await reconcileScheduleChange(agreement);
@@ -459,6 +634,11 @@ const reconcileScheduleChange = async (agreement) => {
   let removed = 0;
   for (const payment of stale) {
     if (keep.has(payment.dueDate.getTime())) continue;
+    // Conditional delete: the row still has to match every qualifier it was
+    // selected under. A handover, manual edit or grouping that landed after
+    // the load makes the delete miss instead of erasing a real obligation.
+    const deleted = await RentPayment.deleteOne({ _id: payment._id, status: 'Pending', groupId: null, lastEditedAt: null });
+    if (!deleted.deletedCount) continue;
     await RentAudit.create({
       adminId: payment.adminId,
       action: 'sync_agreement_schedule',
@@ -469,7 +649,6 @@ const reconcileScheduleChange = async (agreement) => {
       before: { status: payment.status, amount: payment.amount, dueDate: payment.dueDate },
       after: { removed: true },
     });
-    await payment.deleteOne();
     removed += 1;
   }
   return removed;
@@ -488,8 +667,14 @@ const syncPendingPaymentAmounts = async (agreement) => {
   for (const payment of pending) {
     if (payment.amount === amount) continue;
     const before = { amount: payment.amount, dueDate: payment.dueDate };
-    payment.amount = amount;
-    await payment.save();
+    // Conditional write under the same qualifiers as the load: a handover,
+    // manual edit or grouping that landed meanwhile is never overwritten back
+    // to Pending by this sync.
+    const updated = await RentPayment.updateOne(
+      { _id: payment._id, status: 'Pending', groupId: null, lastEditedAt: null },
+      { $set: { amount } },
+    );
+    if (!updated.modifiedCount) continue;
     await RentAudit.create({
       adminId: payment.adminId,
       action: 'sync_agreement_amounts',
@@ -498,7 +683,7 @@ const syncPendingPaymentAmounts = async (agreement) => {
       authorityName: payment.authorityName,
       reason: 'סכום ההסכם עודכן',
       before,
-      after: { amount: payment.amount, dueDate: payment.dueDate },
+      after: { amount, dueDate: payment.dueDate },
     });
     synced += 1;
   }
@@ -511,28 +696,43 @@ const syncPendingPaymentAmounts = async (agreement) => {
 // Handed-but-uncleared cheques stay open obligations with their reminders.
 export const cancelScheduledPayments = async (agreementId) => {
   const pending = await RentPayment.find({ agreementId, status: 'Pending' });
+  const cancelled = [];
   for (const payment of pending) {
-    payment.status = 'Cancelled';
-    await payment.save();
+    // Conditional transition: a handover that landed after the load keeps the
+    // payment out of the cancellation instead of being overwritten by it.
+    const updated = await RentPayment.updateOne({ _id: payment._id, status: 'Pending' }, { $set: { status: 'Cancelled' } });
+    if (!updated.modifiedCount) continue;
+    cancelled.push(payment._id);
     if (!payment.groupId) continue;
-    const group = await RentPaymentGroup.findById(payment.groupId);
-    if (!group || !['Pending', 'Handed'].includes(group.status)) continue;
-    group.allocations = group.allocations.filter((a) => String(a.paymentId) !== String(payment._id));
-    group.totalAmount = group.allocations.reduce((sum, a) => sum + a.amount, 0);
-    if (!group.allocations.length) { group.status = 'Cancelled'; group.cancelledAt = new Date(); }
-    await group.save();
+    // Shrink the group atomically: $pull the allocation and $inc the total by
+    // the payment amount (allocation.amount always equals it), so a concurrent
+    // group write in between is never clobbered by a stale whole-doc save.
+    const group = await RentPaymentGroup.findOneAndUpdate(
+      { _id: payment.groupId, status: { $in: ['Pending', 'Handed'] } },
+      { $pull: { allocations: { paymentId: payment._id } }, $inc: { totalAmount: -payment.amount } },
+      { new: true },
+    );
+    if (group && !group.allocations.length) {
+      await RentPaymentGroup.updateOne(
+        { _id: group._id, status: { $in: ['Pending', 'Handed'] } },
+        { $set: { status: 'Cancelled', cancelledAt: new Date() } },
+      );
+    }
   }
-  return pending.map((p) => p._id);
+  return cancelled;
 };
 
 export const closeAgreement = async (req, res) => {
   const adminId = getAdminId(req.user);
-  const agreement = await RentAgreement.findOne({ _id: req.params.id, adminId });
-  if (!agreement) return res.status(404).json({ message: 'הסכם השכירות לא נמצא' });
+  const agreement = await loadAgreement(req, adminId);
+  if (!agreement) {
+    if (req.expectedUpdatedAt && await RentAgreement.exists({ _id: req.params.id, adminId, status: { $ne: 'Pending_Setup' } })) return staleAgreement(res);
+    return res.status(404).json({ message: 'הסכם השכירות לא נמצא' });
+  }
   if (agreement.status === 'Closed') return res.json(agreement);
   agreement.status = 'Closed';
   agreement.closedAt = new Date();
-  await agreement.save();
+  try { await agreement.save(); } catch (e) { if (isVersionError(e)) return staleAgreement(res); throw e; }
   const cancelledIds = await cancelScheduledPayments(agreement._id);
   // Resolve only reminders whose obligation ended: series-end reminders and
   // reminders of the just-cancelled payments. Handed cheques stay reminded.
@@ -555,10 +755,16 @@ export const markPaymentHanded = async (req, res) => {
   if (payment.groupId) return res.status(409).json({ message: 'התשלום שובץ לתשלום מרוכז - מסירה ופרעון מסומנים על התשלום המרוכז עצמו' });
   if (payment.method !== 'cheque') return res.status(400).json({ message: 'סימון ״צ\'ק נמסר״ רלוונטי רק לתשלום בצ\'ק. בהעברה בנקאית סמנו ישירות ״נפרע״.' });
   if (payment.status !== 'Pending') return res.status(409).json({ message: 'אפשר לסמן ״נמסר״ רק תשלום שממתין למסירה' });
-  payment.status = 'Handed';
-  payment.paidAt = new Date();
-  await payment.save();
-  res.json(payment);
+  // Atomic conditional transition (same pattern as revert): a concurrent
+  // edit, cancellation or schedule sync loses with a 409 instead of being
+  // overwritten by a whole-doc save.
+  const updated = await RentPayment.findOneAndUpdate(
+    { _id: payment._id, status: 'Pending' },
+    { $set: { status: 'Handed', paidAt: new Date() } },
+    { new: true },
+  );
+  if (!updated) return res.status(409).json({ message: 'התשלום השתנה בינתיים. רעננו ונסו שוב.' });
+  res.json(updated);
 };
 
 export const markPaymentCleared = async (req, res) => {
@@ -566,12 +772,15 @@ export const markPaymentCleared = async (req, res) => {
   if (!payment) return;
   if (payment.groupId) return res.status(409).json({ message: 'התשלום שובץ לתשלום מרוכז - מסירה ופרעון מסומנים על התשלום המרוכז עצמו' });
   if (!['Pending', 'Handed'].includes(payment.status)) return res.status(409).json({ message: 'התשלום כבר נפרע או בוטל' });
-  payment.status = 'Cleared';
-  payment.clearedAt = new Date();
-  if (!payment.paidAt) payment.paidAt = payment.clearedAt;
-  await payment.save();
+  const clearedAt = new Date();
+  const updated = await RentPayment.findOneAndUpdate(
+    { _id: payment._id, status: { $in: ['Pending', 'Handed'] } },
+    [{ $set: { status: 'Cleared', clearedAt, paidAt: { $ifNull: ['$paidAt', clearedAt] } } }],
+    { new: true },
+  );
+  if (!updated) return res.status(409).json({ message: 'התשלום השתנה בינתיים. רעננו ונסו שוב.' });
   await generateDueRentReminders(); // resolves this payment's week-before reminder
-  res.json(payment);
+  res.json(updated);
 };
 
 // One payload for the rent screen: authorities with their agreements, the
@@ -587,6 +796,9 @@ export const rentSummary = async (req, res) => {
     RentPaymentGroup.find({ adminId, status: { $ne: 'Cancelled' } }).sort({ dueDate: 1 }),
   ]);
   const active = agreements.filter((a) => a.status === 'Active');
+  // Pending_Setup rows are guarded AI creates that have not committed (or
+  // crashed before committing): they must not render as real agreements.
+  const visible = agreements.filter((a) => a.status !== 'Pending_Setup');
   const totals = {};
   for (const agreement of active) {
     const key = String(agreement.authorityId?._id || agreement.authorityId);
@@ -606,7 +818,7 @@ export const rentSummary = async (req, res) => {
     totals[key].monthly = Math.round(totals[key].monthly * 100) / 100;
     totals[key].annual = Math.round(totals[key].annual * 100) / 100;
   }
-  res.json({ authorities, agreements, payments, groups, totals });
+  res.json({ authorities, agreements: visible, payments, groups, totals });
 };
 
 // ----- Grouped payments: one physical cheque/transfer allocated across daycares -----
@@ -658,7 +870,16 @@ export const createPaymentGroup = async (req, res) => {
     note: String(note || '').trim(),
     allocations,
   });
-  await RentPayment.updateMany({ _id: { $in: ids } }, { groupId: group._id });
+  // Conditional claim, one atomic write per payment: a concurrent grouping of
+  // an overlapping payment loses. The pre-checks above only produce better
+  // messages; this claim is what serializes the race.
+  const claimed = await RentPayment.updateMany({ _id: { $in: ids }, status: 'Pending', groupId: null }, { $set: { groupId: group._id } });
+  if (claimed.modifiedCount !== ids.length) {
+    // Unwind exactly what this attempt claimed, drop the orphan group, refuse.
+    await RentPayment.updateMany({ _id: { $in: ids }, groupId: group._id }, { $set: { groupId: null } });
+    await RentPaymentGroup.deleteOne({ _id: group._id });
+    return res.status(409).json({ message: 'חלק מהתשלומים כבר שובצו לתשלום מרוכז אחר' });
+  }
   res.status(201).json(group);
 };
 
@@ -668,17 +889,26 @@ const findGroup = async (req, res) => {
   return group;
 };
 
-// Propagating a group state onto its payments can only converge, never
-// diverge: payment filters target the states that still need the transition,
-// so a retried call after a partial failure finishes the remaining payments,
-// and a duplicate call is a harmless no-op.
+// The group document is the source of truth for its payments' state: every
+// linked payment must match it. Filters target the states that still need the
+// transition, so a retried call after a partial failure finishes the
+// remaining payments, a duplicate call is a harmless no-op, and payments left
+// behind by a crashed revert converge back to the group's state.
 const propagateGroupState = async (group) => {
   if (group.status === 'Handed') {
-    await RentPayment.updateMany({ groupId: group._id, status: 'Pending' }, { status: 'Handed', paidAt: group.handedAt });
+    await RentPayment.updateMany(
+      { groupId: group._id, status: { $in: ['Pending', 'Cleared'] } },
+      { $set: { status: 'Handed', paidAt: group.handedAt, clearedAt: null } },
+    );
   } else if (group.status === 'Cleared') {
     await RentPayment.updateMany(
       { groupId: group._id, status: { $in: ['Pending', 'Handed'] } },
       [{ $set: { status: 'Cleared', clearedAt: group.clearedAt, paidAt: { $ifNull: ['$paidAt', group.clearedAt] } } }],
+    );
+  } else if (group.status === 'Pending') {
+    await RentPayment.updateMany(
+      { groupId: group._id, status: { $in: ['Handed', 'Cleared'] } },
+      { $set: { status: 'Pending', paidAt: null, clearedAt: null } },
     );
   }
   // Re-link payments that missed the groupId write (partial create failure).
@@ -694,11 +924,16 @@ export const markGroupHanded = async (req, res) => {
   if (group.method !== 'cheque') return res.status(400).json({ message: 'סימון ״צ\'ק נמסר״ רלוונטי רק לתשלום בצ\'ק. בהעברה בנקאית סמנו ישירות ״נפרע״.' });
   if (group.status === 'Handed') { await propagateGroupState(group); return res.json(group); } // idempotent retry
   if (group.status !== 'Pending') return res.status(409).json({ message: 'אפשר לסמן ״נמסר״ רק תשלום שממתין למסירה' });
-  group.status = 'Handed';
-  group.handedAt = new Date();
-  await group.save();
-  await propagateGroupState(group);
-  res.json(group);
+  // Atomic conditional transition: a clearing or cancellation that landed
+  // after the load loses with a 409 instead of being overwritten back.
+  const updated = await RentPaymentGroup.findOneAndUpdate(
+    { _id: group._id, status: 'Pending' },
+    { $set: { status: 'Handed', handedAt: new Date() } },
+    { new: true },
+  );
+  if (!updated) return res.status(409).json({ message: 'התשלום השתנה בינתיים. רעננו ונסו שוב.' });
+  await propagateGroupState(updated);
+  res.json(updated);
 };
 
 export const markGroupCleared = async (req, res) => {
@@ -706,12 +941,15 @@ export const markGroupCleared = async (req, res) => {
   if (!group) return;
   if (group.status === 'Cleared') { await propagateGroupState(group); return res.json(group); } // idempotent retry
   if (!['Pending', 'Handed'].includes(group.status)) return res.status(409).json({ message: 'התשלום המרוכז כבר נפרע או בוטל' });
-  group.status = 'Cleared';
-  group.clearedAt = new Date();
-  await group.save();
-  await propagateGroupState(group);
+  const updated = await RentPaymentGroup.findOneAndUpdate(
+    { _id: group._id, status: { $in: ['Pending', 'Handed'] } },
+    { $set: { status: 'Cleared', clearedAt: new Date() } },
+    { new: true },
+  );
+  if (!updated) return res.status(409).json({ message: 'התשלום השתנה בינתיים. רעננו ונסו שוב.' });
+  await propagateGroupState(updated);
   await generateDueRentReminders(); // resolves the linked payments' reminders
-  res.json(group);
+  res.json(updated);
 };
 
 // Durable recovery: converges any payment/group divergence left by a partial
@@ -720,6 +958,16 @@ export const markGroupCleared = async (req, res) => {
 export const reconcileRentPaymentGroups = async () => {
   const groups = await RentPaymentGroup.find({ status: { $in: ['Pending', 'Handed', 'Cleared'] } });
   for (const group of groups) await propagateGroupState(group);
+  // A group cancel commits before its payment unlink; a crash between leaves
+  // payments linked to a cancelled group and unactionable. Return them to
+  // Pending here so the divergence always heals.
+  const cancelledGroups = await RentPaymentGroup.find({ status: 'Cancelled' }).select('_id');
+  if (cancelledGroups.length) {
+    await RentPayment.updateMany(
+      { groupId: { $in: cancelledGroups.map((g) => g._id) }, status: { $in: ['Pending', 'Handed'] } },
+      { $set: { status: 'Pending', groupId: null, paidAt: null } },
+    );
+  }
 };
 
 // ----- Record corrections: edit a pending payment, cancel a grouped payment -----
@@ -731,39 +979,50 @@ export const editPayment = async (req, res) => {
   if (!payment) return;
   if (payment.status !== 'Pending') return res.status(409).json({ message: 'אפשר לערוך רק תשלום שממתין. תשלום שנמסר או נפרע נשאר לתיעוד.' });
   const before = { amount: payment.amount, dueDate: payment.dueDate };
+  const update = {};
   if (req.body.amount !== undefined) {
     const amount = Number(req.body.amount);
     if (!(amount > 0)) return res.status(400).json({ message: 'יש להזין סכום חיובי' });
-    payment.amount = amount;
+    update.amount = amount;
   }
   if (req.body.dueDate !== undefined) {
     if (!validDate(req.body.dueDate)) return res.status(400).json({ message: 'יש להזין תאריך פרעון תקין' });
-    payment.dueDate = dayStart(req.body.dueDate);
+    update.dueDate = dayStart(req.body.dueDate);
   }
-  if (payment.amount === before.amount && payment.dueDate.getTime() === new Date(before.dueDate).getTime()) {
+  const nextAmount = update.amount !== undefined ? update.amount : before.amount;
+  const nextDueDate = update.dueDate !== undefined ? update.dueDate : before.dueDate;
+  if (nextAmount === before.amount && new Date(nextDueDate).getTime() === new Date(before.dueDate).getTime()) {
     return res.status(400).json({ message: 'לא בוצע שינוי' });
   }
+  // One atomic conditional write: the status filter is the commit guard, so a
+  // handover or clearing racing this edit rejects the edit (409) instead of
+  // the edit silently resurrecting the payment back to Pending.
+  let saved;
   try {
-    await payment.save(); // the {agreementId, dueDate} unique key rejects a collision
+    saved = await RentPayment.findOneAndUpdate(
+      // Optional precondition (AI confirm path): amount, due date and ungrouped state the user approved are pinned at the commit itself.
+      { _id: payment._id, adminId: payment.adminId, status: 'Pending', ...(req.expectedPayment ? { amount: req.expectedPayment.amount, dueDate: req.expectedPayment.dueDate, groupId: null } : {}) },
+      { $set: { ...update, lastEditedAt: new Date() } },
+      { new: true }
+    ); // the {agreementId, dueDate} unique key rejects a collision
   } catch (error) {
     if (error?.code === 11000) return res.status(409).json({ message: 'כבר קיים תשלום לתאריך הזה בהסכם הזה' });
     throw error;
   }
+  if (!saved) return res.status(409).json({ message: 'התשלום השתנה בינתיים. רעננו ונסו שוב.' });
   // A grouped payment's share and the group total must stay equal: the
   // correction updates the allocation and the total together.
   if (payment.groupId) {
     const group = await RentPaymentGroup.findById(payment.groupId);
     if (group && ['Pending', 'Handed'].includes(group.status)) {
-      const allocation = group.allocations.find((a) => String(a.paymentId) === String(payment._id));
+      const allocation = group.allocations.find((a) => String(a.paymentId) === String(saved._id));
       if (allocation) {
-        allocation.amount = payment.amount;
+        allocation.amount = saved.amount;
         group.totalAmount = group.allocations.reduce((sum, a) => sum + a.amount, 0);
         await group.save();
       }
     }
   }
-  payment.lastEditedAt = new Date();
-  await payment.save();
   await RentAudit.create({
     adminId: payment.adminId,
     action: 'edit_payment',
@@ -773,10 +1032,10 @@ export const editPayment = async (req, res) => {
     authorityName: payment.authorityName,
     reason: String(req.body.reason || '').trim(),
     before,
-    after: { amount: payment.amount, dueDate: payment.dueDate },
+    after: { amount: saved.amount, dueDate: saved.dueDate },
     createdBy: req.user._id,
   });
-  res.json(payment);
+  res.json(saved);
 };
 
 // Cancels the RECORD of a grouped payment (the cheque was never handed, or
@@ -787,7 +1046,15 @@ export const editPayment = async (req, res) => {
 export const cancelPaymentGroup = async (req, res) => {
   const group = await findGroup(req, res);
   if (!group) return;
-  if (group.status === 'Cancelled') return res.json(group); // idempotent
+  if (group.status === 'Cancelled') {
+    // Idempotent retry converges a partial cancel (group committed, payment
+    // unlink lost to a crash): finish returning the payments to Pending.
+    await RentPayment.updateMany(
+      { groupId: group._id, status: { $in: ['Pending', 'Handed'] } },
+      { $set: { status: 'Pending', groupId: null, paidAt: null } },
+    );
+    return res.json(group);
+  }
   if (group.status === 'Cleared') return res.status(409).json({ message: 'תשלום שכבר נפרע לא ניתן לביטול - מדובר בכסף שעבר בפועל' });
   const payments = await RentPayment.find({ groupId: group._id });
   const before = {
@@ -795,17 +1062,20 @@ export const cancelPaymentGroup = async (req, res) => {
     totalAmount: group.totalAmount,
     allocations: group.allocations.map((a) => ({ branchName: a.branchName, amount: a.amount })),
   };
-  for (const payment of payments) {
-    if (['Pending', 'Handed'].includes(payment.status)) {
-      payment.status = 'Pending';
-      payment.groupId = null;
-      payment.paidAt = null;
-      await payment.save();
-    }
-  }
-  group.status = 'Cancelled';
-  group.cancelledAt = new Date();
-  await group.save();
+  // Conditional group transition first: a clearing that landed after the load
+  // is money that moved, so the cancel loses with a 409 instead of erasing it.
+  const cancelled = await RentPaymentGroup.findOneAndUpdate(
+    { _id: group._id, status: { $in: ['Pending', 'Handed'] } },
+    { $set: { status: 'Cancelled', cancelledAt: new Date() } },
+    { new: true },
+  );
+  if (!cancelled) return res.status(409).json({ message: 'התשלום השתנה בינתיים. רעננו ונסו שוב.' });
+  // Only payments still in a live state return to Pending; one that raced to
+  // Cleared meanwhile is real money and stays untouched.
+  const returned = await RentPayment.updateMany(
+    { groupId: group._id, status: { $in: ['Pending', 'Handed'] } },
+    { $set: { status: 'Pending', groupId: null, paidAt: null } },
+  );
   await RentAudit.create({
     adminId: group.adminId,
     action: 'cancel_group',
@@ -813,11 +1083,11 @@ export const cancelPaymentGroup = async (req, res) => {
     authorityName: group.authorityName,
     reason: String(req.body.reason || '').trim(),
     before,
-    after: { status: 'Cancelled', returnedToPending: payments.length },
+    after: { status: 'Cancelled', returnedToPending: returned.modifiedCount },
     createdBy: req.user._id,
   });
   await generateDueRentReminders(); // re-arms week-before reminders if the payments are due soon
-  res.json(group);
+  res.json(cancelled);
 };
 
 // Records-only status reversal for a mistaken click (e.g. marked cleared by
@@ -846,10 +1116,16 @@ export const revertPaymentStatus = async (req, res) => {
   const target = revertState(payment);
   if (!target) return res.status(409).json({ message: 'אפשר לבטל סימון רק של תשלום שסומן כנמסר או כנפרע' });
   const before = { status: payment.status, paidAt: payment.paidAt, clearedAt: payment.clearedAt };
-  payment.status = target;
-  if (target === 'Pending') payment.paidAt = null;
-  payment.clearedAt = null;
-  await payment.save();
+  // Atomic conditional write: the transition applies only if the payment is
+  // still in the state the target was derived from. A concurrent mutation
+  // (AI retry, another admin, a UI double-click) loses the race with a 409
+  // instead of running the transition a second time.
+  const updated = await RentPayment.findOneAndUpdate(
+    { _id: payment._id, status: payment.status },
+    { $set: { status: target, paidAt: target === 'Pending' ? null : payment.paidAt, clearedAt: null } },
+    { new: true },
+  );
+  if (!updated) return res.status(409).json({ message: 'התשלום השתנה בינתיים. רעננו ונסו שוב.' });
   await reopenReminders([payment._id]);
   await RentAudit.create({
     adminId: payment.adminId,
@@ -859,30 +1135,35 @@ export const revertPaymentStatus = async (req, res) => {
     authorityName: payment.authorityName,
     reason: String(req.body.reason || '').trim(),
     before,
-    after: { status: payment.status, paidAt: payment.paidAt, clearedAt: payment.clearedAt },
+    after: { status: updated.status, paidAt: updated.paidAt, clearedAt: updated.clearedAt },
     createdBy: req.user._id,
   });
-  res.json(payment);
+  res.json(updated);
 };
 
 export const revertGroupStatus = async (req, res) => {
   const group = await findGroup(req, res);
   if (!group) return;
   const target = revertState({ status: group.status, method: group.method, paidAt: group.handedAt });
-  if (!target) return res.status(409).json({ message: 'אפשר לבטל סימון רק של תשלום מרוכז שסומן כנמסר או כנפרע' });
-  const before = { status: group.status, handedAt: group.handedAt, clearedAt: group.clearedAt };
-  group.status = target;
-  if (target === 'Pending') group.handedAt = null;
-  group.clearedAt = null;
-  await group.save();
-  const payments = await RentPayment.find({ groupId: group._id });
-  for (const payment of payments) {
-    if (!['Handed', 'Cleared'].includes(payment.status)) continue;
-    payment.status = target;
-    if (target === 'Pending') payment.paidAt = null;
-    payment.clearedAt = null;
-    await payment.save();
+  if (!target) {
+    // Retry convergence: a previous revert may have committed the group and
+    // crashed before its payments followed. Heal them to the group's state
+    // (the same rule the hourly reconcile applies) before refusing.
+    await propagateGroupState(group);
+    return res.status(409).json({ message: 'אפשר לבטל סימון רק של תשלום מרוכז שסומן כנמסר או כנפרע' });
   }
+  const before = { status: group.status, handedAt: group.handedAt, clearedAt: group.clearedAt };
+  const updatedGroup = await RentPaymentGroup.findOneAndUpdate(
+    { _id: group._id, status: group.status },
+    { $set: { status: target, handedAt: target === 'Pending' ? null : group.handedAt, clearedAt: null } },
+    { new: true },
+  );
+  if (!updatedGroup) return res.status(409).json({ message: 'התשלום השתנה בינתיים. רעננו ונסו שוב.' });
+  const payments = await RentPayment.find({ groupId: group._id });
+  // The payments follow the group's new state through the same convergent
+  // propagation the hourly reconcile runs, so a crash after the commit is
+  // healed on the next reconcile or retry instead of diverging permanently.
+  await propagateGroupState(updatedGroup);
   await reopenReminders(payments.map((p) => p._id));
   await RentAudit.create({
     adminId: group.adminId,
@@ -891,10 +1172,10 @@ export const revertGroupStatus = async (req, res) => {
     authorityName: group.authorityName,
     reason: String(req.body.reason || '').trim(),
     before,
-    after: { status: group.status, handedAt: group.handedAt, clearedAt: group.clearedAt, paymentsReverted: payments.length },
+    after: { status: updatedGroup.status, handedAt: updatedGroup.handedAt, clearedAt: updatedGroup.clearedAt, paymentsReverted: payments.length },
     createdBy: req.user._id,
   });
-  res.json(group);
+  res.json(updatedGroup);
 };
 
 // ----- Actual-paid report: what was really paid, per authority and per branch -----

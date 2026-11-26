@@ -21,6 +21,14 @@ export const protect = async (req, res, next) => {
 
   req.user = await User.findById(decoded.id).select('-password');
   if (!req.user) return res.status(401).json({ message: 'המשתמש אינו קיים עוד. התחברו מחדש.' });
+  // Access JWTs outlive a password change by up to their expiry. The token
+  // carries the auth version it was issued under; a password reset increments
+  // the version atomically with the password write, so a stale version means
+  // the password changed after this token was minted - reject it, even if it
+  // was minted in the very same second as the change.
+  if ((decoded.av || 0) !== (req.user.authVersion || 0)) {
+    return res.status(401).json({ message: 'החיבור פג או שאינו תקף. התחברו שוב.' });
+  }
   return next();
 };
 

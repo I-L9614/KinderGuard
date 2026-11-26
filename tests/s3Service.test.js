@@ -28,12 +28,25 @@ describe('S3 Service', () => {
     process.env.S3_REGION = 'us-east-1';
   });
 
+  it('identical timestamp and identical sanitized filename still get distinct keys, and both objects are written', async () => {
+    s3Mock.on(PutObjectCommand).resolves({});
+    vi.spyOn(Date, 'now').mockReturnValue(1700000000000);
+    const [k1, k2] = await Promise.all([uploadFileToS3(Buffer.from('a'), 'חוזה.pdf', 'application/pdf', 'rent'), uploadFileToS3(Buffer.from('b'), 'הסכם.pdf', 'application/pdf', 'rent')]);
+    expect(k1).not.toBe(k2); expect(k1).toMatch(/^rent\/1700000000000-/); expect(k1.endsWith('____.pdf') || k1.endsWith('___.pdf') || k1.endsWith('.pdf')).toBe(true);
+    const puts = s3Mock.commandCalls(PutObjectCommand); expect(puts).toHaveLength(2);
+    expect(new Set(puts.map((c) => c.args[0].input.Key)).size).toBe(2);
+    expect(puts.map((c) => c.args[0].input.Body.toString()).sort()).toEqual(['a', 'b']);
+    const long = await uploadFileToS3(Buffer.from('c'), `${'x'.repeat(400)}.pdf`, 'application/pdf');
+    expect(long.length).toBeLessThan(200);
+    Date.now.mockRestore();
+  });
+
   it('uploads a file privately (no public ACL) and returns its storage key', async () => {
     s3Mock.on(PutObjectCommand).resolves({});
 
     const key = await uploadFileToS3(Buffer.from('hello'), 'test.pdf', 'application/pdf');
 
-    expect(key).toMatch(/^licenses\/\d+-test\.pdf$/);
+    expect(key).toMatch(/^licenses\/\d+-[0-9a-f-]{36}-test\.pdf$/);
     expect(key).not.toContain('bucket-name');
     expect(key).not.toMatch(/^https?:/);
     const calls = s3Mock.calls();

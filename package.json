@@ -1,6 +1,6 @@
 {
   "name": "kinderguard",
-  "version": "0.3.21",
+  "version": "0.3.22",
   "private": true,
   "description": "KinderGuard desktop app for managing daycare branches and permit renewals.",
   "main": "electron/main.js",
@@ -12,7 +12,8 @@
     "dist": "electron-builder",
     "check": "node --check src/server.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "ai:coverage": "node scripts/aiCoverageGate.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.392.0",
@@ -25,11 +26,13 @@
     "express": "^4.18.2",
     "express-rate-limit": "^7.1.0",
     "express-validator": "^7.0.1",
+    "fflate": "0.8.3",
     "helmet": "^7.0.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^7.7.0",
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
+    "saxen": "12.0.0",
     "winston": "^3.10.0"
   },
   "devDependencies": {

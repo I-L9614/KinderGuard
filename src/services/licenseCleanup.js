@@ -51,6 +51,28 @@ export const deleteLicenseDocument = async (license, context = '') => {
   return true;
 };
 
+// Retries durable standalone file deletions (deleteLicenseFile, renewal
+// deleteOldFile cleanup) whose storage call failed or crashed after the
+// reference was already cleared. DeleteObject is idempotent on a missing key,
+// so every attempt re-issues the delete and clears the intent only after it
+// is confirmed.
+export const reconcilePendingFileDeletions = async () => {
+  const pendings = await License.find({ pendingFileDeletion: { $ne: '' } });
+  let cleared = 0;
+  for (const license of pendings) {
+    try {
+      await deleteFileFromS3(license.pendingFileDeletion);
+    } catch (error) {
+      logger.error(`Pending file deletion retry failed for ${license.pendingFileDeletion}: ${error.message}`);
+      continue;
+    }
+    await License.updateOne({ _id: license._id, pendingFileDeletion: license.pendingFileDeletion }, { $set: { pendingFileDeletion: '' } });
+    cleared += 1;
+  }
+  if (cleared > 0) logger.info(`Pending file deletion recovery cleared ${cleared} stored object(s)`);
+  return cleared;
+};
+
 // Converges user-confirmed branch deletions: for each recorded deletion
 // operation whose branch is already gone, finish removing its remaining
 // permits (with documents and alerts) through the same durable-intent path.

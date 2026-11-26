@@ -2,9 +2,9 @@ import './config/env.js';
 import app from './app.js';
 import connectDB from './config/db.js';
 import { cleanupExpiredRefreshTokens } from './controllers/authController.js';
-import { reconcileBranchDeletions } from './services/licenseCleanup.js';
+import { reconcileBranchDeletions, reconcilePendingFileDeletions } from './services/licenseCleanup.js';
 import { generateDueNotifications } from './controllers/notificationController.js';
-import { scheduleAllRentPayments, generateDueRentReminders, reconcileRentPaymentGroups } from './controllers/rentController.js';
+import { scheduleAllRentPayments, generateDueRentReminders, reconcileRentPaymentGroups, reconcileAuthorityDeleteGuards, reconcileGuardedAgreementCreates } from './controllers/rentController.js';
 import { refreshLicenseStatuses } from './controllers/licenseController.js';
 import { fileURLToPath } from 'url';
 
@@ -46,8 +46,11 @@ export const startServer = async () => {
     await generateDueNotifications();
     await scheduleAllRentPayments();
     await reconcileRentPaymentGroups();
+    await reconcileAuthorityDeleteGuards();
+    await reconcileGuardedAgreementCreates();
     await generateDueRentReminders();
     await reconcileBranchDeletions();
+    await reconcilePendingFileDeletions();
   };
   runDailyMaintenance().catch((err) => console.error('License maintenance failed:', safeErrorText(err)));
   maintenanceInterval = setInterval(() => {

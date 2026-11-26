@@ -18,7 +18,7 @@ const PASSWORD = 'Password123';
 const WRONG = 'WrongPass1';
 
 const makeUser = async (email) => {
-  await request(app).post('/api/users').set('Authorization', `Bearer ${adminToken}`).send({ name: 'Lockout User', email, password: PASSWORD }).expect(201);
+  await request(app).post('/api/users').set('Authorization', `Bearer ${adminToken}`).send({ name: `Lockout-${Math.random().toString(36).slice(2)}`, email, password: PASSWORD }).expect(201);
 };
 const fail = (email) => request(app).post('/api/users/login').send({ email, password: WRONG });
 const succeed = (email) => request(app).post('/api/users/login').send({ email, password: PASSWORD });

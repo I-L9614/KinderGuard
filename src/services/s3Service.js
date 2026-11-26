@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 
 const getS3Client = () => {
@@ -28,8 +29,11 @@ export const uploadFileToS3 = async (buffer, fileName, contentType, prefix = 'li
   const { bucket, client } = getS3Client();
 
   const safePrefix = String(prefix).replace(/[^a-zA-Z0-9_-]/g, '_');
-  const safeFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const key = `${safePrefix}/${Date.now()}-${safeFileName}`;
+  // Sanitizing turns every Hebrew character into "_", so different names can collapse to the same string, and two
+  // requests can share a millisecond. A random id makes every key unique, so an upload can never overwrite an
+  // existing object. The name part is only a readable hint (capped so the key stays well under the S3 limit).
+  const safeFileName = String(fileName || 'file').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-100);
+  const key = `${safePrefix}/${Date.now()}-${randomUUID()}-${safeFileName}`;
 
   await client.send(new PutObjectCommand({
     Bucket: bucket,

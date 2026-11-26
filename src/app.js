@@ -18,6 +18,7 @@ import { applySecurityMiddleware } from './middleware/securityMiddleware.js';
 import logger from './utils/logger.js';
 import cookieParser from 'cookie-parser';
 import authRoutes from './routes/authRoutes.js';
+import { createAiRouter } from './ai/aiRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -64,6 +65,9 @@ app.use('/api/tasks', taskRoutes);
 app.use('/api/rent', rentRoutes);
 app.use('/api/import', importRoutes);
 app.use('/api/auth', authRoutes);
+// AI worker: every route runs protect + requireAiAccess (aiEnabled users only). Model calls answer 503 until
+// ANTHROPIC_API_KEY is configured; AI_ENABLED=false removes the routes entirely.
+if (process.env.AI_ENABLED !== 'false') app.use('/api/ai', createAiRouter());
 
 if (fs.existsSync(frontendPath)) {
   app.get('*', (req, res, next) => {

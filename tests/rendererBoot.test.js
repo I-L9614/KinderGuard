@@ -13,7 +13,7 @@ const license = { _id: 'l1', branchId: 'b1', licenseTypeId: type, issueDate: '20
 
 const apiStub = (url) => {
   const p = url.split('?')[0];
-  if (p === '/api/auth/refresh') return { token: 'stub' };
+  if (p === '/api/auth/refresh') return { token: `h.${btoa(JSON.stringify({ id: 'u1' })).replace(/=+$/, '')}.s` };
   if (p === '/api/users/me') return { _id: 'u1', name: 'בודק', role: 'Admin' };
   if (p === '/api/branches') return [branch];
   if (p === '/api/licenses') return [license];

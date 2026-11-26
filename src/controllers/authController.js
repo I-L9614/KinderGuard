@@ -1,5 +1,7 @@
 import crypto from 'crypto';
+import { issueStepUpGrant } from '../utils/stepUp.js';
 import RefreshToken from '../models/RefreshToken.js';
+import StepUpFail from '../models/StepUpFail.js';
 import User from '../models/User.js';
 import jwt from 'jsonwebtoken';
 import logger from '../utils/logger.js';
@@ -8,6 +10,9 @@ export const hashToken = (token) => crypto.createHash('sha256').update(String(to
 
 const REFRESH_TOKEN_TTL_MS = parseInt(process.env.REFRESH_TOKEN_TTL_MS || String(30 * 24 * 60 * 60 * 1000), 10);
 const REFRESH_TOKEN_LIMIT = parseInt(process.env.REFRESH_TOKEN_LIMIT || '5', 10);
+// Grace window that separates a legitimate concurrent-refresh race from a
+// replayed stolen token; see the refresh handler below.
+const REUSE_GRACE_MS = parseInt(process.env.REFRESH_REUSE_GRACE_MS || '30000', 10);
 
 const createRefreshToken = async (userId, opts = {}) => {
   const token = crypto.randomBytes(48).toString('hex');
@@ -36,8 +41,12 @@ const createRefreshToken = async (userId, opts = {}) => {
   return doc;
 };
 
-const generateAccessToken = (userId) => {
-  return jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '1h' });
+// The access JWT carries the user's auth version (av). A password reset
+// increments the version atomically with the password write, and protect
+// rejects any token whose av is stale - so a reset kills live access tokens
+// immediately, with no reliance on clock comparison.
+const generateAccessToken = (user) => {
+  return jwt.sign({ id: user._id, av: user.authVersion || 0 }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '1h' });
 };
 
 export const refreshToken = async (req, res) => {
@@ -49,7 +58,20 @@ export const refreshToken = async (req, res) => {
   // the hashing change valid until they age out, so deploys force no re-login.
   const tokenDoc = await RefreshToken.findOne({ tokenHash: hashToken(incoming) })
     || await RefreshToken.findOne({ token: incoming });
-  if (!tokenDoc || tokenDoc.revoked || tokenDoc.expiresAt < new Date()) {
+  if (!tokenDoc || tokenDoc.expiresAt < new Date()) {
+    return res.status(401).json({ message: 'פג תוקף החיבור. התחברו שוב.' });
+  }
+  // A revoked token presented again is either a race (two near-simultaneous
+  // refreshes from clients sharing one cookie jar) or a replay of a stolen
+  // token. Within REUSE_GRACE_MS of the revocation we assume a race and only
+  // reject; past it we assume theft and revoke every active session of the
+  // user, forcing a fresh sign-in on all devices. Expired-only tokens are
+  // never treated as replay (handled above).
+  if (tokenDoc.revoked) {
+    const revokedForMs = Date.now() - new Date(tokenDoc.updatedAt).getTime();
+    if (revokedForMs > REUSE_GRACE_MS) {
+      await RefreshToken.updateMany({ user: tokenDoc.user, revoked: false }, { revoked: true });
+    }
     return res.status(401).json({ message: 'פג תוקף החיבור. התחברו שוב.' });
   }
 
@@ -73,8 +95,34 @@ export const refreshToken = async (req, res) => {
     maxAge: REFRESH_TOKEN_TTL_MS,
   });
 
-  const accessToken = generateAccessToken(user._id);
+  const accessToken = generateAccessToken(user);
   return res.json({ token: accessToken });
+};
+
+// Step-up for sensitive actions (AI-triggered deletes, role changes, ...):
+// the client re-checks the password here and receives a short-lived,
+// single-use, action-scoped token; the action endpoint verifies it via
+// requireStepUp. Passwords never ride along with the action itself.
+// Wrong-password attempts are bounded twice: the route's loginLimiter per IP,
+// and this per-user counter so rotating IPs cannot keep guessing against one
+// account. STEPUP_WINDOW is implicit in the StepUpFail TTL (~15 minutes); a
+// successful step-up clears the count.
+const STEPUP_MAX_FAILURES = parseInt(process.env.STEPUP_MAX_FAILURES || '5', 10);
+export const stepUp = async (req, res) => {
+  const { password, action, scope } = req.body;
+  const failures = await StepUpFail.countDocuments({ userId: req.user._id });
+  if (failures >= STEPUP_MAX_FAILURES) {
+    return res.status(429).json({ message: 'יותר מדי ניסיונות. המתינו כמה דקות ונסו שוב.' });
+  }
+  // req.user is password-stripped by protect; fetch the full record to check.
+  const user = await User.findById(req.user._id);
+  if (!(await user.comparePassword(String(password || '')))) {
+    await StepUpFail.create({ userId: req.user._id });
+    return res.status(401).json({ message: 'סיסמה שגויה.' });
+  }
+  await StepUpFail.deleteMany({ userId: req.user._id });
+  const { token, expiresIn } = await issueStepUpGrant(user, String(action), scope);
+  res.json({ stepUpToken: token, expiresIn });
 };
 
 export const logout = async (req, res) => {
@@ -97,7 +145,7 @@ export const logout = async (req, res) => {
 };
 
 export const issueTokensForUser = async (res, user) => {
-  const accessToken = generateAccessToken(user._id);
+  const accessToken = generateAccessToken(user);
   const refreshDoc = await createRefreshToken(user._id);
   // set httpOnly cookie with secure attributes
   res.cookie('refreshToken', refreshDoc.token, {
