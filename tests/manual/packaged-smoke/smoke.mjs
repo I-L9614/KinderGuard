@@ -191,7 +191,7 @@ try {
   await evalJs(`
     const seed = await fetch('/api/users/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'בדיקת עשן', email: 'smoke-admin@test.local', password: 'smoke-pass-123' }) });
     if (!seed.ok) throw new Error('seed admin failed: ' + seed.status);
-    document.querySelector('input[name="email"]').value = 'smoke-admin@test.local';
+    document.querySelector('input[name="identifier"]').value = 'smoke-admin@test.local';
     document.querySelector('input[name="password"]').value = 'smoke-pass-123';
     document.querySelector('#authForm button[type="submit"]').click();
     return true;`);

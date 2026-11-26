@@ -123,7 +123,7 @@ export async function captureUiEvidence({ exe, outDir, cdpPort, fail, ok }) {
 
     // Login through the real window (default tab is התחברות).
     await evalJs(`
-      document.querySelector('input[name="email"]').value = 'smoke-admin@test.local';
+      document.querySelector('input[name="identifier"]').value = 'smoke-admin@test.local';
       document.querySelector('input[name="password"]').value = 'smoke-pass-123';
       document.querySelector('#authForm button[type="submit"]').click();
       return true;`);
