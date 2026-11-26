@@ -27,6 +27,11 @@ beforeAll(async () => {
   mongoServer = await MongoMemoryServer.create({ binary: { version: '8.2.6', downloadDir } });
   process.env.MONGO_URI = mongoServer.getUri(); await mongoose.connect(process.env.MONGO_URI);
   ({ default: app } = await import('../src/app.js'));
+  // Index builds can lag on slow runners (Windows CI): wait, bounded, for the live unique index the production 503 gate requires. The gate itself is unchanged.
+  const { default: LicenseModel } = await import('../src/models/License.js'); const { activeUniqueIndexPresent } = await import('../src/utils/licenseIndex.js');
+  await LicenseModel.init(); await (await import('../src/models/LicenseType.js')).default.init();
+  for (let i = 0; i < 100 && !(await activeUniqueIndexPresent()); i += 1) await new Promise((r) => setTimeout(r, 100));
+  if (!(await activeUniqueIndexPresent())) throw new Error('license unique index not built within 10s');
   const admin = await request(app).post('/api/users/register').send({ name: 'Admin', email: `license-${Date.now()}@example.com`, password: 'Password123' }).expect(201);
   token = admin.body.token;
   adminId = admin.body.id;

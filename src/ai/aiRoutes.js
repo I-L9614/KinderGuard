@@ -32,9 +32,14 @@ const SYSTEM = 'אתה עוזר בתוך מערכת KinderGuard לניהול מ�
 // Proposal-only: returns text, never writes to the database. Mounted at /api/ai
 // by the caller; protect + requireAiAccess run before anything else.
 const defaultClient = () => {
+  // AI_BUDGET_USD=off: no app-side dollar cap (the provider's prepaid balance is the limit; its empty-credit error becomes the Hebrew notice).
+  // Any other value is a finite dollar cap as before; unset keeps the safe default of 2.
+  const enforceBudget = String(process.env.AI_BUDGET_USD || '').trim().toLowerCase() !== 'off';
   const budgetUsd = Number(process.env.AI_BUDGET_USD) || 2;
+  // AI_DAILY_CALL_LIMIT=off: no daily call quota (calls are still counted). Anything else is the finite daily limit; unset keeps 50.
+  const enforceDaily = String(process.env.AI_DAILY_CALL_LIMIT || '').trim().toLowerCase() !== 'off';
   const dailyCallLimit = Number(process.env.AI_DAILY_CALL_LIMIT) || 50;
-  return createClaudeClient({ budgetUsd, dailyCallLimit, ledger: createMongoLedger({ budgetUsd, dailyCallLimit }), log: (event, fields) => logger.warn(event + ' ' + JSON.stringify(fields)) });
+  return createClaudeClient({ budgetUsd, dailyCallLimit, ledger: createMongoLedger({ budgetUsd, dailyCallLimit, enforceBudget, enforceDaily }), log: (event, fields) => logger.warn(event + ' ' + JSON.stringify(fields)) });
 };
 
 export const createAiRouter = ({ client: rawClient = defaultClient() } = {}) => {

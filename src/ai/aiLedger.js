@@ -12,15 +12,17 @@ import { AI_MSG } from './claudeClient.js';
 // billed), so retries are always counted. settle() corrects to the real cost.
 const KEY = 'ledger';
 
-export const createMongoLedger = ({ budgetUsd, dailyCallLimit, now = () => new Date() }) => ({
+// enforceBudget=false (AI_BUDGET_USD=off) drops the lifetime dollar condition and enforceDaily=false (AI_DAILY_CALL_LIMIT=off) the daily call condition.
+// Spend and the daily call count are still tracked either way.
+export const createMongoLedger = ({ budgetUsd, dailyCallLimit, enforceBudget = true, enforceDaily = true, now = () => new Date() }) => ({
   async reserve(estUsd) {
     const today = now().toISOString().slice(0, 10);
     await AiUsage.updateOne({ key: KEY }, { $setOnInsert: { key: KEY, spentUsd: 0, calls: 0, day: '' } }, { upsert: true }).catch((e) => { if (e.code !== 11000) throw e; });
     const sameDay = { $eq: ['$day', today] };
     const updated = await AiUsage.findOneAndUpdate(
       { key: KEY, $expr: { $and: [
-        { $lte: [{ $add: ['$spentUsd', estUsd] }, budgetUsd] },
-        { $or: [{ $ne: ['$day', today] }, { $lt: ['$calls', dailyCallLimit] }] },
+        ...(enforceBudget ? [{ $lte: [{ $add: ['$spentUsd', estUsd] }, budgetUsd] }] : []),
+        ...(enforceDaily ? [{ $or: [{ $ne: ['$day', today] }, { $lt: ['$calls', dailyCallLimit] }] }] : []),
       ] } },
       [{ $set: {
         spentUsd: { $add: ['$spentUsd', estUsd] },
@@ -35,7 +37,7 @@ export const createMongoLedger = ({ budgetUsd, dailyCallLimit, now = () => new D
     }
     // Refused: say which limit, for a useful message. Nothing was changed.
     const cur = await AiUsage.findOne({ key: KEY });
-    if (cur && cur.spentUsd + estUsd > budgetUsd) throw Object.assign(new Error(AI_MSG.budget), { statusCode: 429 });
+    if (enforceBudget && cur && cur.spentUsd + estUsd > budgetUsd) throw Object.assign(new Error(AI_MSG.budget), { statusCode: 429 });
     throw Object.assign(new Error(AI_MSG.daily), { statusCode: 429 });
   },
   // Idempotent: only the first settle of a reservation id changes spend.

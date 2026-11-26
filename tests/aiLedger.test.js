@@ -30,6 +30,27 @@ describe('persistent AI ledger', () => {
     const b = createMongoLedger({ budgetUsd: 1, dailyCallLimit: 10 });
     expect(await b.spent()).toBeCloseTo(0.01);
   });
+  it('enforceBudget=false drops only the dollar cap: spend is still tracked and the daily call limit still holds', async () => {
+    await AiUsage.deleteMany({});
+    const l = createMongoLedger({ budgetUsd: 1, dailyCallLimit: 15, enforceBudget: false });
+    const res = await Promise.allSettled(Array.from({ length: 20 }, () => l.reserve(0.1)));
+    expect(res.filter((r) => r.status === 'fulfilled').length).toBe(15);
+    expect(res.find((r) => r.status === 'rejected').reason.message).toMatch(/מכסת הקריאות היומית/);
+    expect(await l.spent()).toBeCloseTo(1.5);
+    const strict = createMongoLedger({ budgetUsd: 1, dailyCallLimit: 1000 });
+    await expect(strict.reserve(0.1)).rejects.toMatchObject({ statusCode: 429 });
+  });
+  it('enforceDaily=false drops only the daily call quota: calls are still counted and the dollar cap still holds', async () => {
+    await AiUsage.deleteMany({});
+    const l = createMongoLedger({ budgetUsd: 100, dailyCallLimit: 3, enforceDaily: false });
+    const res = await Promise.allSettled(Array.from({ length: 10 }, () => l.reserve(0.1)));
+    expect(res.every((r) => r.status === 'fulfilled')).toBe(true);
+    expect((await AiUsage.findOne({ key: 'ledger' })).calls).toBe(10);
+    const both = createMongoLedger({ budgetUsd: 1, dailyCallLimit: 3, enforceBudget: false, enforceDaily: false });
+    await expect(both.reserve(50)).resolves.toBeTruthy();
+    const capped = createMongoLedger({ budgetUsd: 1, dailyCallLimit: 3, enforceDaily: false });
+    await expect(capped.reserve(0.1)).rejects.toMatchObject({ statusCode: 429 });
+  });
   it('daily limit holds under concurrency and a refusal changes nothing (single atomic update)', async () => {
     await AiUsage.deleteMany({});
     const l = createMongoLedger({ budgetUsd: 100, dailyCallLimit: 5 });

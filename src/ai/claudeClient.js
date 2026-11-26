@@ -42,14 +42,14 @@ const providerFailure = async (res, fallbackMsg) => {
 };
 
 // In-process ledger (tests / local scripts). Production uses createMongoLedger.
-export const createMemoryLedger = ({ budgetUsd, dailyCallLimit, now = () => new Date() }) => {
+export const createMemoryLedger = ({ budgetUsd, dailyCallLimit, enforceBudget = true, now = () => new Date() }) => {
   let day = ''; let calls = 0; let spent = 0; let seq = 0; const settled = new Set();
   return {
     async reserve(estUsd) {
       const today = now().toISOString().slice(0, 10);
       if (today !== day) { day = today; calls = 0; }
       if (calls >= dailyCallLimit) throw Object.assign(new Error(AI_MSG.daily), { statusCode: 429 });
-      if (spent + estUsd > budgetUsd) throw Object.assign(new Error(AI_MSG.budget), { statusCode: 429 });
+      if (enforceBudget && spent + estUsd > budgetUsd) throw Object.assign(new Error(AI_MSG.budget), { statusCode: 429 });
       calls += 1; spent += estUsd; seq += 1; return { reservationId: `m${seq}`, estUsd };
     },
     async settle(r, actual) { if (settled.has(r.reservationId)) return false; settled.add(r.reservationId); spent += actual - r.estUsd; return true; },
