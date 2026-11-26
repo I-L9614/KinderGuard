@@ -15,3 +15,10 @@ export function computeCompleteness(types, licenses) {
   });
   return out;
 }
+
+// Green "all fine" is allowed only when no required approval is missing or
+// expired. When nothing is expiring but approvals are missing, say so neutrally.
+export function expiryAllClear({ expiredCount, expiring, completeness }) {
+  if (expiredCount || expiring) return null;
+  return completeness.total && !completeness.missing && !completeness.expired ? 'good' : 'neutral';
+}
