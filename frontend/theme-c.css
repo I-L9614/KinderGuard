@@ -276,3 +276,7 @@ input,select,textarea{accent-color:#10231f}
 .crumbs .crumb-link{all:unset;cursor:pointer;color:#10231f;font-weight:700;padding:5px 12px;border-radius:999px;background:#fff;box-shadow:inset 0 0 0 1px #dfe8e3;transition:background .15s}
 .crumbs .crumb-link:hover{background:#c8f169}.crumbs .crumb-link:focus-visible{outline:2px solid #10231f;outline-offset:2px}
 .crumbs svg{flex:none;color:#9aaba5}.crumbs .crumb-current{color:#6b7f79;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bt-main{display:flex;align-items:center;gap:16px}
+.back-square{all:unset;box-sizing:border-box;flex:none;width:48px;height:48px;border-radius:16px;display:grid;place-items:center;cursor:pointer;background:#10231f;color:#c8f169;transition:transform .15s,background .15s}
+.back-square:hover{background:#1b3a33;transform:translateX(3px)}.back-square:focus-visible{outline:3px solid #c8f169;outline-offset:2px}
+@media(max-width:620px){.bt-main{gap:12px}.back-square{width:42px;height:42px;border-radius:14px}}
