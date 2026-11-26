@@ -215,6 +215,7 @@ input,select,textarea{accent-color:#10231f}
 .branch-top{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:16px}
 .branch-top>*{margin:0!important;border-radius:28px;padding:26px;min-width:0}
 .branch-card-score{background:var(--lime);display:flex;flex-direction:column;justify-content:space-between;gap:10px}
+.branch-card-score.incomplete{background:#ffe7a3}
 .branch-card-score small{font-size:16px;font-weight:800}
 .branch-card-score strong{font-size:64px;line-height:1;letter-spacing:-2px;font-weight:800}
 .score-bar{height:10px;border-radius:99px;background:#10231f26;overflow:hidden}.score-bar i{display:block;height:100%;background:#10231f;border-radius:99px}
@@ -258,3 +259,5 @@ input,select,textarea{accent-color:#10231f}
   #rentAnnualCard .stat-icon{display:grid}#rentAnnualCard strong{font-size:19px}
   .compact.stats-grid .stat-card{flex-direction:column;align-items:flex-start}
 }
+.empty-state[hidden]{display:none!important}
+#seriesWrap{border:0;padding:0;margin:0;min-width:0}#seriesWrap legend{float:right;width:100%;padding:6px 0;margin:0}#seriesWrap legend+*{clear:both}#seriesWrap legend input{margin-inline-end:8px}
